@@ -338,7 +338,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
             prefix = os.path.dirname(job_info.trg_cube_path)
             cube_full_path = job_info.trg_cube_path
 
-            if cube_data == 'skipped':
+            if cube_data is None:
                 print("Skipped cube {0}".format(job_info.trg_cube_path))
                 continue
 
@@ -399,7 +399,7 @@ def downsample_cube(job_info):
     if skip_already_cubed_layers:
         if os.path.exists(job_info.trg_cube_path):
             if os.path.getsize(job_info.trg_cube_path) == cube_edge_len**3:
-                return 'skipped'
+                return None
 
     if FADVISE_AVAILABLE:
         for src_path in job_info.src_cube_paths:
