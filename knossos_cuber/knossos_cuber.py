@@ -615,6 +615,8 @@ def write_cube(cube_data, prefix, cube_full_path):
     """TODO
     """
 
+    if (cube_data==0).all(): return
+
     #ref_time=time.time()
     if not os.path.exists(prefix):
         os.makedirs(prefix)
