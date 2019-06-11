@@ -53,6 +53,9 @@ from pathlib import Path
 #import libtiff
 #import tifffile
 
+# https://github.com/zimeon/iiif/issues/11
+Image.MAX_IMAGE_PIXELS = 1e10
+
 SOURCE_FORMAT_FILES = OrderedDict()
 SOURCE_FORMAT_FILES['tif'] = ['tif', 'tiff', 'TIF', 'TIFF', '*.tif, *.tiff']
 SOURCE_FORMAT_FILES['jpg'] = ['jpg', 'jpeg', 'JPG', 'JPEG', '*.jpg, *.jpeg']
@@ -350,7 +353,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
             this_job_info.trg_cube_path = get_cube_fname(dataset_base_path, experimentname, trg_mag, cur_x // 2, cur_y // 2, cur_z // 2, extension)  #d int/int
 
         if config.getboolean('Processing', 'skip_already_cubed_layers') and (\
-                os.path.exists(this_job_info.trg_cube_path) and 
+                os.path.exists(this_job_info.trg_cube_path) and
                 #os.path.exists(this_job_info.trg_cube_path.replace("png", "jpg"))\
                 (not zanisotrop or os.path.exists(this_job_info.trg_cube_path2))):
                 #and os.path.exists(this_job_info.trg_cube_path2.replace("png", "jpg"))):
@@ -524,7 +527,7 @@ def downsample_cube(job_info):
             # Yes, I know the numpy fromfile function - this is significantly
             # faster on our cluster
             content = ''
-            # buffersize=131072*2
+            #buffersize=131072*2
             fd = io.open(path_to_src_cube, 'rb')
             #             # buffering = buffersize)
             # for i in range(0, (cube_edge_len**3 / buffersize) + 1):
@@ -664,7 +667,8 @@ def compress_dataset(config, log_fn):
 
     worker_pool = multiprocessing.Pool(num_workers, compress_cube_init, [log_queue])
     # distribute cubes to worker pool
-    async_result = worker_pool.map(compress_cube, compress_job_infos, chunksize=10)
+    #async_result = worker_pool.map(compress_cube, compress_job_infos, chunksize=10)
+    worker_pool.map(compress_cube, compress_job_infos, chunksize=10)
     worker_pool.close()
 
     #while not async_result.ready():
@@ -681,7 +685,7 @@ def compress_cube(job_info, cube_raw = None):
     """TODO
     """
 
-    ref_time = time.time()
+    #ref_time = time.time()
     cube_edge_len = job_info.cube_edge_len
     open_jpeg_bin_path = job_info.open_jpeg_bin_path
 
@@ -718,7 +722,6 @@ def compress_cube(job_info, cube_raw = None):
         elif job_info.src_cube_path.endswith(".png"):
             cube_raw = np.array(Image.open(job_info.src_cube_path))
     cube_raw = cube_raw.reshape(cube_edge_len * cube_edge_len, -1)
-
 
     if job_info.pre_gauss > 0.0:
         # blur only in 2d
@@ -870,10 +873,6 @@ def init_from_source_dir(config, log_fn):
     # assumed to have equal dimensions!
     test_img = Image.open(all_source_files[0])
     test_data = np.array(test_img)
-    
-    #test_data = tifffile.imread(all_source_files[0])
-    
-    #test_data = libtiff.TIFF.open(all_source_files[0]).read_image()
 
     # knossos uses swapped xy axes relative to images
     test_data = np.swapaxes(test_data, 0, 1)
@@ -881,8 +880,6 @@ def init_from_source_dir(config, log_fn):
     source_dims = test_data.shape
     config.set('Dataset', 'source_dims', str(test_data.shape))
     config.set('Dataset', 'source_dtype', str(test_data.dtype))
-    print(test_data.shape)
-    print(test_data.dtype)
 
     #q (important for division below!) Why getfloat, not getint? It is int in the config.ini and that would make more sense.
     cube_edge_len = config.getfloat('Processing', 'cube_edge_len')
@@ -896,6 +893,8 @@ def init_from_source_dir(config, log_fn):
 
     buffer_size_in_cubes = config.getint('Processing', 'buffer_size_in_cubes')
 
+    log_fn("Dataset is %d x %d x %d knossos cubes" % \
+          (num_x_cubes, num_y_cubes, num_z_cubes))
     if num_x_cubes * num_y_cubes < buffer_size_in_cubes:
         log_fn("Buffer size sufficient for a single pass per z cube layer")
         num_passes_per_cube_layer = 1
@@ -904,11 +903,17 @@ def init_from_source_dir(config, log_fn):
         log_fn("Buffer size not sufficient for single pass per z cube layer - "
                "either increase the buffer size or accept the longer cubing "
                "time due to IO overhead.")
-        num_passes_per_cube_layer = \
-            int(math.ceil(buffer_size_in_cubes // num_y_cubes)) #d int/int
-        #q ^ This should not be a floor division, right? int(math.ceil()) is redundant because result is always a floored int. Apply regular float division inside?
+        log_fn("\tadjusting buffer_size_in_cubes from %d to multiple"
+               " of number of y cubes" % (buffer_size_in_cubes,))
+        buffer_size_in_cubes = \
+            int(math.ceil(buffer_size_in_cubes / num_y_cubes)) * num_y_cubes
+        log_fn("\tnew buffer_size_in_cubes %d" % (buffer_size_in_cubes,))
+        num_x_cubes_per_pass = buffer_size_in_cubes // num_y_cubes
 
-        num_x_cubes_per_pass = num_x_cubes // num_passes_per_cube_layer #d int/int
+        num_passes_per_cube_layer = \
+            int(math.ceil(num_x_cubes / num_x_cubes_per_pass))
+        log_fn("\trequires %d passes per cube layer, %d xcubes per pass" % \
+               (num_passes_per_cube_layer,num_x_cubes_per_pass))
 
     CubingInfo = namedtuple('CubingInfo',
                             'num_x_cubes_per_pass num_y_cubes num_z_cubes '
@@ -983,20 +988,15 @@ def make_mag1_cubes_from_z_stack(config,
 
             # create a src binary copy mask to speed-up the following buffer-filling
             # process; this mask is made for the source_dims
-            if num_passes_per_cube_layer > 1:
-                copy_mask_src = np.zeros([source_dims[0], source_dims[1]], dtype=source_dtype)
+            #copy_mask_src = np.zeros([source_dims[0], source_dims[1]])
 
             this_pass_x_start = cur_pass * num_x_cubes_per_pass * cube_edge_len
-
             this_pass_x_end = (cur_pass+1) * num_x_cubes_per_pass * cube_edge_len
-
-
             if this_pass_x_end > source_dims[0]:
                 this_pass_x_end = source_dims[0]
 
-            if num_passes_per_cube_layer > 1:
-                copy_mask_src[this_pass_x_start:this_pass_x_end, :] = 1
-                copy_mask_src = (copy_mask_src == 1)
+            #copy_mask_src[this_pass_x_start:this_pass_x_end, :] = 1
+            #copy_mask_src = (copy_mask_src == 1)
 
             # create a trg binary copy mask to speed-up the following buffer-filling
             # process; this mask is made for the target buffer dims
@@ -1033,19 +1033,27 @@ def make_mag1_cubes_from_z_stack(config,
                 #                             dtype=source_dtype)
                 #else:
                 #ref_time = time.time()
-                fsize = os.stat(all_source_files[z]).st_size
-                buffersize = 524288//2 # optimal for soma cluster #d int/int
-                content = b''
-                # This is optimized code, do not think that a single line
-                # would be faster. At least on the soma MPI cluster,
-                # the default buffering values (read entire file into buffer
-                # instead of smaller chunks) leads to delays and slowness.
-                fd = io.open(all_source_files[z], 'r+b', buffering=buffersize)
-                for i in range(0, (fsize // buffersize) + 1): #d int/int
-                    content += fd.read(buffersize)
-                fd.close()
 
-                PIL_image = Image.open(io.BytesIO(content))
+                if config.getboolean('Processing', 'use_simple_image_open'):
+                    # This is much faster on a normal workstation than the
+                    # buffering code below. Recommended solution on a cluster
+                    # is to copy the image to a memory mapped drive first
+                    # and then use PIL open on that memory mapped file.
+                    PIL_image = Image.open(all_source_files[z])
+                else:
+                    fsize = os.stat(all_source_files[z]).st_size
+                    buffersize = 524288//2 # optimal for soma cluster #d int/int
+                    content = b''
+                    # This is optimized code, do not think that a single line
+                    # would be faster. At least on the soma MPI cluster,
+                    # the default buffering values (read entire file into buffer
+                    # instead of smaller chunks) leads to delays and slowness.
+                    fd = io.open(all_source_files[z], 'r+b', buffering=buffersize)
+                    for i in range(0, (fsize // buffersize) + 1): #d int/int
+                        content += fd.read(buffersize)
+                    fd.close()
+                    PIL_image = Image.open(io.BytesIO(content))
+
                 this_layer = np.array(PIL_image)
 
                 # This stupid swap axes call costs us 50% of the image loading
@@ -1058,7 +1066,10 @@ def make_mag1_cubes_from_z_stack(config,
 
                 # copy the data for this pass into the output buffer
                 if num_passes_per_cube_layer > 1:
-                    this_layer_out_block[z, :, :] = this_layer[copy_mask_src]
+                    this_layer_piece = this_layer[this_pass_x_start:this_pass_x_end,:]
+                    this_layer_out_block[local_z,
+                                         0:this_layer_piece.shape[0],
+                                         0:this_layer_piece.shape[1]] = this_layer_piece
                 else:
                     # single buffer fill - this_layer_out_block is larger than
                     # the individual data files due to the rounding to
@@ -1066,7 +1077,6 @@ def make_mag1_cubes_from_z_stack(config,
                     # therefore; it is crucial that the slowest changing index,
                     # z, is at the first index (c-style order). The time
                     # difference is 100x for big amounts of data!
-
                     this_layer_out_block[local_z,
                                          0:this_layer.shape[0],
                                          0:this_layer.shape[1]] = this_layer
@@ -1081,8 +1091,7 @@ def make_mag1_cubes_from_z_stack(config,
             for cur_x in range(0, num_x_cubes_per_pass):
                 for cur_y in range(0, num_y_cubes):
                     ref_time = time.time()
-                    glob_cur_x_cube = \
-                        cur_x + cur_pass * num_passes_per_cube_layer
+                    glob_cur_x_cube = cur_x + cur_pass * num_x_cubes_per_pass
                     glob_cur_y_cube = cur_y
                     glob_cur_z_cube = cur_z
 
@@ -1256,10 +1265,9 @@ def validate_config(config):
         True if configuration is alright.
     """
 
-    perform_mag1_cubing = config.getboolean('Processing',
-                                            'perform_mag1_cubing')
-
     # not true !!!
+    #perform_mag1_cubing = config.getboolean('Processing',
+    #                                        'perform_mag1_cubing')
     #if not perform_mag1_cubing and not config.get('Dataset', 'boundaries'):
     #    raise InvalidCubingConfigError("When starting from mag1 cubes, the "
     #                                   "dataset boundaries must be specified.")
