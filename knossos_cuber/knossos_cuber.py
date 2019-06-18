@@ -49,6 +49,7 @@ from shutil import copyfile
 from pathlib import Path
 
 #import skimage.transform
+#from skimage import measure
 
 #import libtiff
 #import tifffile
@@ -165,7 +166,8 @@ def write_knossos_conf(data_set_base_folder='',
                        scale=(10., 10., 25.),
                        boundary=(1000, 1000, 1000),
                        exp_name='stack',
-                       mag=1):
+                       mag=1,
+                       cube_edge_len=128):
     """Writes a knossos.conf file for the use with KNOSSOS."""
 
     if not os.path.exists(data_set_base_folder):
@@ -180,6 +182,7 @@ def write_knossos_conf(data_set_base_folder='',
         conf_file.write("scale y {0};\n".format(scale[1]))
         conf_file.write("scale z {0};\n".format(scale[2]))
         conf_file.write("magnification {0};\n".format(mag))
+        conf_file.write("cube_edge_length {0};\n".format(cube_edge_len))
 
     return
 
@@ -290,8 +293,10 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
         log_fn("Further downsampling is useless, stopping.")
         return False
 
+    zanisotrop = trg_mag <= config.getint('Processing', 'keep_z_until_mag', fallback=1)
+
     out_path = dataset_base_path + '/mag' + str(trg_mag) + '/'
-    log_fn("Downsampling to {0}".format(out_path))
+    log_fn("Downsampling to {0}, anisotropic z {1}".format(out_path, zanisotrop))
 
     log_fn("Src dataset cube dimensions: x {0}, y {1}, z {2}"
            .format(max_x+1, max_y+1, max_z+1))
@@ -345,7 +350,6 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
 
         # out_path = out_path.replace('mag'+str(src_mag), 'mag'+str(trg_mag))
         extension = ".jpg"
-        zanisotrop = trg_mag <= config.getint('Processing', 'keep_z_until_mag', fallback=1)
         if zanisotrop: # TODO
             this_job_info.trg_cube_path = get_cube_fname(dataset_base_path, experimentname, trg_mag, cur_x // 2, cur_y // 2, cur_z, extension)  #d int/int
             this_job_info.trg_cube_path2 = get_cube_fname(dataset_base_path, experimentname, trg_mag, cur_x // 2, cur_y // 2, cur_z + 1, extension)  #d int/int
@@ -389,7 +393,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     log_queue = multiprocessing.Queue()
 
     job_prep_time = time.time() - job_prep_time
-    log_fn("Job preparation took {0} s".format(job_prep_time))
+    log_fn("Job preparation took {0:.2f} s".format(job_prep_time))
 
     # for job in chunked_jobs[0]:
     #     for path in job.src_cube_paths:
@@ -429,13 +433,14 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
 
         worker_pool.join()
 
-        log_fn("Downsampling took {0} s (on avg per cube {1} s)"
+        log_fn("Downsampling took {0:.2f} s (on avg per cube {1} s)"
                .format(time.time() - ref_time
                , (time.time() - ref_time) / len(this_job_chunk))) #d float/int
 
         log_fn("Writing (and compressing)…")
         write_threads = []
         cube_write_time = time.time()
+        nskipped_cubes = [0,0]
         # start writing the cubes
         for cube_data, job_info in zip(cubes, this_job_chunk):
             # for chunk in this_job_chunk:
@@ -448,8 +453,8 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                 continue
 
             if job_info.trg_cube_path2 is not '':
-                first_cube = cube_data[0:128, :, :]
-                second_cube = cube_data[128:256, :, :]
+                first_cube = cube_data[:cube_edge_len, :, :]
+                second_cube = cube_data[cube_edge_len:, :, :]
             else:
                 first_cube = cube_data
 
@@ -468,6 +473,8 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                                                      job_info.trg_cube_path])
                 write_threads.append(this_thread)
                 this_thread.start()
+            else:
+                nskipped_cubes[0] += 1
             if job_info.trg_cube_path2 is not '' and not np.sum(second_cube) == 0:
                 this_thread = threading.Thread(target=write_compressed_cube,
                                                args=[config,
@@ -476,6 +483,8 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                                                      job_info.trg_cube_path2])
                 write_threads.append(this_thread)
                 this_thread.start()
+            else:
+                nskipped_cubes[1] += 1
 
         # wait until all writes are finished
         [x.join() for x in write_threads]
@@ -484,13 +493,13 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
         chunk_time = time.time() - chunk_time
 
         if len(write_threads) > 0:
-            log_fn("Writing {0} cubes took {1} s (on avg {2} s per cube)"
+            log_fn("Writing {0} cubes took {1:.2f} s (on avg {2} s per cube)"
                    .format(len(write_threads), cube_write_time, cube_write_time / len(write_threads)))
-
-            log_fn("Processing chunk took {0} s (on avg per cube {1} s)"
+            log_fn("Processing chunk took {0:.2f} s (on avg per cube {1} s)"
                    .format(chunk_time, chunk_time / len(this_job_chunk)))
+            log_fn("Skipped {0} empty first and {1} empty second cubes".format(nskipped_cubes[0], nskipped_cubes[1]))
         else:
-            log_fn("Skipped complete chunk in {0} s".format(chunk_time))
+            log_fn("Skipped complete chunk in {0:.6f} s".format(chunk_time))
 
     return True
 
@@ -560,6 +569,8 @@ def downsample_cube(job_info):
             this_job_info.pre_gauss = job_info.config.getfloat('Compression', 'pre_comp_gauss_filter')
             compress_cube(this_job_info, this_cube)
 
+        # NO swap here!
+        # new cuber removed 'F' order allocation and loading above, so swap is no longer necessary.
         #this_cube = np.swapaxes(this_cube, 0, 2)
         #this_cube = np.swapaxes(this_cube, 1, 2)
 
@@ -605,6 +616,7 @@ def downsample_cube(job_info):
         mode='nearest'
         # cval=0.0,
         )
+
     # for i in range(0, down_block.shape[0]):
     #     down_block[i] = scipy.ndimage.gaussian_filter(
     #         down_block[i],
@@ -618,6 +630,10 @@ def downsample_cube(job_info):
     #                                       preserve_range=True,
     #                                       #anti_aliasing=True
     # ).astype(job_info.source_dtype)
+
+    ## use block-reduce method
+    #block_size = (1,2,2) if job_info.trg_cube_path2 else (2,2,2)
+    #down_block = measure.block_reduce(down_block, block_size=block_size, func=np.median).astype(job_info.source_dtype)
 
     # extract directory of out_path
     #if not os.path.exists(os.path.dirname(job_info.trg_cube_path)):
@@ -962,50 +978,46 @@ def make_mag1_cubes_from_z_stack(config,
 
     num_io_threads = config.getint('Processing', 'num_io_threads')
 
+    # this is for generating mags starting with isotropic voxels.
+    # this allows for a dataset with mags other than 2x downsamplings to be created.
+    # this is to get as close as possible to isotropic voxels using integer downsampling.
+    first_mag = config.getint('Processing', 'first_mag')
+
+    num_x_cubes = num_x_cubes_per_pass*num_passes_per_cube_layer
+
     # we iterate over the z cubes and handle cube layer after cube layer
     for cur_z in range(0, num_z_cubes):
-        if skip_already_cubed_layers:
-            # test whether this layer contains already "cubes"
-            prefix = os.path.normpath(os.path.abspath(
-                target_path + '/mag1' + '/x%04d/y%04d/z%04d/' % (1, 1, cur_z)))
-
-            cube_full_path = os.path.normpath(
-                prefix + '/%s_mag%d_x%04d_y%04d_z%04d.raw'
-                # 1 indicates mag1
-                % (exp_name, 1, 1, 1, cur_z))
-
-            if os.path.exists(cube_full_path):
-                log_fn("Skipping cube layer: {0}".format(cur_z))
-                continue
-
         for cur_pass in range(0, num_passes_per_cube_layer):
+            this_pass_x_start = cur_pass * num_x_cubes_per_pass * cube_edge_len
+            this_pass_x_end = (cur_pass+1) * num_x_cubes_per_pass * cube_edge_len
+            if this_pass_x_end > source_dims[0]:
+                this_pass_x_end = source_dims[0]
+
+            if skip_already_cubed_layers:
+                # check the middle of x,y for an existing cube,
+                #   as cubes on the edges for many datasets are frequently empty.
+                check_x = cur_pass * num_x_cubes_per_pass + num_x_cubes_per_pass//2
+                check_y = num_y_cubes//2
+
+                # test whether this layer contains already "cubes"
+                prefix = os.path.normpath(os.path.abspath(
+                    target_path + ('/mag%d' % (first_mag,)) + ('/x%04d/y%04d/z%04d/' % (check_x, check_y, cur_z)) ))
+
+                cube_full_path = os.path.normpath(
+                    prefix + '/%s_mag%d_x%04d_y%04d_z%04d.raw'
+                    % (exp_name, first_mag, check_x, check_y, cur_z))
+
+                if os.path.exists(cube_full_path):
+                    log_fn("Skipping cube layer {0} pass {1}, cube found:".format(cur_z, cur_pass))
+                    print(cube_full_path)
+                    continue
+
             # allocate memory for this layer
             this_layer_out_block = np.zeros(
                 [cube_edge_len,
                  num_x_cubes_per_pass * cube_edge_len,
                  num_y_cubes * cube_edge_len],
                 dtype=source_dtype)
-
-            # create a src binary copy mask to speed-up the following buffer-filling
-            # process; this mask is made for the source_dims
-            #copy_mask_src = np.zeros([source_dims[0], source_dims[1]])
-
-            this_pass_x_start = cur_pass * num_x_cubes_per_pass * cube_edge_len
-            this_pass_x_end = (cur_pass+1) * num_x_cubes_per_pass * cube_edge_len
-            if this_pass_x_end > source_dims[0]:
-                this_pass_x_end = source_dims[0]
-
-            #copy_mask_src[this_pass_x_start:this_pass_x_end, :] = 1
-            #copy_mask_src = (copy_mask_src == 1)
-
-            # create a trg binary copy mask to speed-up the following buffer-filling
-            # process; this mask is made for the target buffer dims
-            #copy_mask_trg = np.zeros([num_x_cubes*cube_edge_len,
-            #                             num_y_cubes*cube_edge_len])
-            #copy_mask_trg[0:num_x_cubes_per_pass*cube_edge_len, :] = 1
-            #copy_mask_trg = (copy_mask_trg == 1)
-            #if cur_z > 2:
-            #    raise()
 
             # tell the kernel that we will need the next layer; not sure how much
             # we gain here, this needs to be evaluated
@@ -1015,16 +1027,18 @@ def make_mag1_cubes_from_z_stack(config,
             #        fadvise.willneed(all_source_files[z])
 
 
+            log_fn("Loading source files for pass {0}/{1}".format(cur_pass, num_passes_per_cube_layer))
+            ref_time = time.time()
+
             # fill the buffer with data
             local_z = 0
             for z in range(cur_z * cube_edge_len, (cur_z + 1) * cube_edge_len):
-                try:
-                    log_fn("Loading {0}".format(all_source_files[z]))
-                except IndexError:
-                    log_fn("No more image files available.")
-                    break
-
-                ref_time = time.time()
+                if z >= len(all_source_files): break
+                #try:
+                #    log_fn("Loading {0}".format(all_source_files[z]))
+                #except IndexError:
+                #    log_fn("No more image files available.")
+                #    break
 
                 #if source_format == 'raw':
                 #    this_layer = np.fromfile(all_source_files[z],
@@ -1082,45 +1096,52 @@ def make_mag1_cubes_from_z_stack(config,
                                          0:this_layer.shape[1]] = this_layer
 
                 local_z += 1
-                log_fn("Reading took {0}".format(time.time() - ref_time))
+                #log_fn("Reading took {0}".format(time.time() - ref_time))
+            log_fn("Reading took {0:.2f} s".format(time.time() - ref_time))
 
             write_times = []
             write_threads = []
 
             # write out the cubes for this z-cube layer and buffer
+            nskipped_cubes = 0
             for cur_x in range(0, num_x_cubes_per_pass):
+                x_start = cur_x*cube_edge_len
+                x_end = (cur_x+1)*cube_edge_len
+                glob_cur_x_cube = cur_x + cur_pass * num_x_cubes_per_pass
+                glob_cur_z_cube = cur_z
+                log_fn("Writing y cubes for x={0}/{1}, z={2}/{3}"\
+                       .format(glob_cur_x_cube, num_x_cubes, cur_z, num_z_cubes))
                 for cur_y in range(0, num_y_cubes):
                     ref_time = time.time()
-                    glob_cur_x_cube = cur_x + cur_pass * num_x_cubes_per_pass
                     glob_cur_y_cube = cur_y
-                    glob_cur_z_cube = cur_z
 
                     # slice cube_data out of buffer
-                    x_start = cur_x*cube_edge_len
-                    x_end = (cur_x+1)*cube_edge_len
-
                     y_start = cur_y*cube_edge_len
                     y_end = (cur_y+1)*cube_edge_len
 
                     cube_data = this_layer_out_block[
                         :, x_start:x_end, y_start:y_end]
 
-                    #cube_data = np.swapaxes(cube_data, 1, 2)
+                    if np.sum(cube_data) == 0:
+                        nskipped_cubes += 1
+                        continue
+
+                    # still needed this, at least with same_knossos_as_tif_stack_xy_orientation==True
+                    cube_data = np.swapaxes(cube_data, 1, 2)
 
                     prefix = os.path.normpath(os.path.abspath(
-                        target_path + '/mag1' + '/x%04d/y%04d/z%04d/'
-                        % (glob_cur_x_cube, glob_cur_y_cube, glob_cur_z_cube)))
+                        target_path + ('/mag%d' % (first_mag,)) + ('/x%04d/y%04d/z%04d/'
+                        % (glob_cur_x_cube, glob_cur_y_cube, glob_cur_z_cube)) ))
 
                     cube_full_path = os.path.normpath(
                         prefix + '/%s_mag%d_x%04d_y%04d_z%04d.raw'
                         % (exp_name,
-                           # 1 indicates mag1
-                           1,
+                           first_mag,
                            glob_cur_x_cube,
                            glob_cur_y_cube,
                            glob_cur_z_cube))
 
-                    log_fn("Writing cube {0}".format(cube_full_path))
+                    #log_fn("Writing cube {0}".format(cube_full_path))
 
                     # threaded cube writing gave a speed up of a factor of 10(!!)
                     if threading.active_count() < num_io_threads:
@@ -1146,8 +1167,9 @@ def make_mag1_cubes_from_z_stack(config,
 
                     write_times.append(time.time() - ref_time)
 
-            log_fn("Writing took on avg per cube: {0} s"
-                   .format(np.mean(write_times)))
+            log_fn("Writing took {0:.2f} s (on avg per cube: {1} s)"
+                   .format(np.sum(write_times), np.mean(write_times)))
+            log_fn("Skipped {0} empty cubes".format(nskipped_cubes))
 
             # wait until all writes are finished for this layer
             [x.join() for x in write_threads]
@@ -1194,12 +1216,18 @@ def knossos_cuber(config, log_fn):
         scale = literal_eval(config.get('Dataset', 'scaling'))
         exp_name = config.get('Project', 'exp_name')
 
-        write_knossos_conf(dataset_base_path + "/", scale, boundaries, exp_name, mag=1)
-        open(dataset_base_path + "/mag1/knossos.conf", 'w') # only write dummy for mag detection
+        # this is for generating mags starting with isotropic voxels.
+        # this allows for a dataset with mags other than 2x downsamplings to be created.
+        # this is to get as close as possible to isotropic voxels using integer downsampling.
+        first_mag = config.getint('Processing', 'first_mag')
+
+        cube_edge_len = config.getint('Processing', 'cube_edge_len')
+        write_knossos_conf(dataset_base_path + "/", scale, boundaries, exp_name, mag=1, cube_edge_len=cube_edge_len)
+        open(dataset_base_path + ("/mag%d/knossos.conf" % (first_mag,)), 'w') # only write dummy for mag detection
 
         total_mag1_time = time.time() - mag1_ref_time
 
-        log_fn("Mag 1 succesfully cubed. Took {0} h".format(total_mag1_time/3600)) #d f/i
+        log_fn("Mag 1 succesfully cubed. Took {0:.4f} h".format(total_mag1_time/3600)) #d f/i
 
     knossos_mag_names = config.get('Dataset', 'mag_names', fallback="knossos").lower() == "knossos"
     if knossos_mag_names:
@@ -1218,7 +1246,9 @@ def knossos_cuber(config, log_fn):
         mags_to_gen = reduce(lambda x, y: int(x) ** int(y),
                              mags_to_gen_string.split("**"))
 
-        while curr_mag < mags_to_gen:
+        if not knossos_mag_names:
+            mags_to_gen = int(np.log2(mags_to_gen))+1
+        while curr_mag <= mags_to_gen:
             if knossos_mag_names:
                 prev_mag = curr_mag // 2
             else:
@@ -1235,14 +1265,14 @@ def knossos_cuber(config, log_fn):
                 log_fn("Done with downsampling.")
                 break
 
-        log_fn("All mags generated. Took {0} h."
+        log_fn("All mags generated. Took {0:.4f} h."
                .format((time.time() - total_down_ref_time)/3600))
 
     if config.getboolean('Compression', 'perform_compression'):
         total_comp_ref_time = time.time()
         compress_dataset(config, log_fn)
 
-        log_fn("Compression done. Took {0} h."
+        log_fn("Compression done. Took {0:.4f} h."
                .format((time.time() - total_comp_ref_time)/3600))
 
     log_fn('All done.')
