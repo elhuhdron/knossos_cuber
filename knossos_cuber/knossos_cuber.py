@@ -51,6 +51,10 @@ from pathlib import Path
 #import skimage.transform
 #from skimage import measure
 
+import psutil
+def get_mem_usage():
+    return psutil.Process(os.getpid()).memory_info().rss // 2**20
+
 #import libtiff
 #import tifffile
 
@@ -317,6 +321,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
 
     downsampling_job_info = []
     skipped_count = 0
+    skip_already_cubed_downsample_layers = config.getboolean('Processing', 'skip_already_cubed_downsample_layers')
     for cur_x, cur_y, cur_z in itertools.product(range(0, max_x+2, 2),
                                                  range(0, max_y+2, 2),
                                                  range(0, max_z+2, 2)):
@@ -356,7 +361,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
         else:
             this_job_info.trg_cube_path = get_cube_fname(dataset_base_path, experimentname, trg_mag, cur_x // 2, cur_y // 2, cur_z // 2, extension)  #d int/int
 
-        if config.getboolean('Processing', 'skip_already_cubed_layers') and (\
+        if skip_already_cubed_downsample_layers and (\
                 os.path.exists(this_job_info.trg_cube_path) and
                 #os.path.exists(this_job_info.trg_cube_path.replace("png", "jpg"))\
                 (not zanisotrop or os.path.exists(this_job_info.trg_cube_path2))):
@@ -376,8 +381,8 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
         # split the jobs in chunks
 
         # how many chunks do we need?
-        chunks_required = \
-            len(downsampling_job_info) // buffer_size_in_cubes_downsampling  #d int/int  #q Should this really be a floor division?
+        scl = 2 if zanisotrop else 1
+        chunks_required = int(np.ceil(len(downsampling_job_info)*scl / buffer_size_in_cubes_downsampling))
 
         chunked_jobs = np.array_split(downsampling_job_info, chunks_required)
         # convert back to python list
@@ -385,7 +390,8 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     else:
         chunked_jobs = [downsampling_job_info]
 
-    log_fn("{0} todo, {1} chunks, {2} total".format(len(downsampling_job_info), len(chunked_jobs), len(downsampling_job_info) + skipped_count))
+    log_fn("{0} ds jobs to run in {1} chunks, {2} skipped, {3} total".format(len(downsampling_job_info),
+           len(chunked_jobs), skipped_count, len(downsampling_job_info) + skipped_count))
 
     if len(downsampling_job_info) == 0:
         return True
@@ -405,12 +411,12 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     #         print("cp -v {0} {1}".format(path2, path))
     # exit(0)
 
+    #worker_pool = multiprocessing.Pool(num_workers, downsample_cube_init, [log_queue])
+    ##worker_pool = multiprocessing_threads.Pool(num_workers)
+    worker_pool = multiprocessing.Pool(num_workers, downsample_cube_init, [log_queue], maxtasksperchild=num_workers)
+
     for chunk_id, this_job_chunk in enumerate(chunked_jobs):
-    #if True:
-    #    chunk_id = 2*len(chunked_jobs)//3
-    #    this_job_chunk = chunked_jobs[chunk_id]
-        #if trg_mag == 2 and chunk_id < 125:
-        #    continue
+        log_fn('Memory usage {0} MB'.format(get_mem_usage()))
 
         chunk_time = time.time()
 
@@ -419,19 +425,17 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                .format(len(this_job_chunk), chunk_id, len(chunked_jobs), this_job_chunk[0].trg_cube_path))
 
         ref_time = time.time()
-        worker_pool = multiprocessing.Pool(num_workers, downsample_cube_init, [log_queue])
-        #worker_pool = multiprocessing_threads.Pool(num_workers)
 
         log_fn("Downsampling…")
         cubes = worker_pool.map(downsample_cube, this_job_chunk, chunksize=10)
-        worker_pool.close()
+        #worker_pool.close()
 
         while not log_queue.empty():
             log_output = log_queue.get()
             log_fn(log_output)
         #cubes = map(downsample_cube, this_job_chunk)
 
-        worker_pool.join()
+        #worker_pool.join()
 
         log_fn("Downsampling took {0:.2f} s (on avg per cube {1} s)"
                .format(time.time() - ref_time
@@ -457,6 +461,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                 second_cube = cube_data[cube_edge_len:, :, :]
             else:
                 first_cube = cube_data
+                second_cube = None
 
             # print(cube_data.shape, first_cube.shape, second_cube.shape)
             # exit(0)
@@ -465,7 +470,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
             if threading.active_count() >= num_io_threads:
                 while threading.active_count() >= num_io_threads:
                     time.sleep(0.001)
-            if not np.sum(first_cube) == 0:
+            if np.sum(first_cube) != 0:
                 this_thread = threading.Thread(target=write_compressed_cube,
                                                args=[config,
                                                      first_cube,
@@ -475,7 +480,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                 this_thread.start()
             else:
                 nskipped_cubes[0] += 1
-            if job_info.trg_cube_path2 is not '' and not np.sum(second_cube) == 0:
+            if job_info.trg_cube_path2 is not '' and np.sum(second_cube) != 0:
                 this_thread = threading.Thread(target=write_compressed_cube,
                                                args=[config,
                                                      second_cube,
@@ -483,7 +488,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                                                      job_info.trg_cube_path2])
                 write_threads.append(this_thread)
                 this_thread.start()
-            else:
+            elif job_info.trg_cube_path2 is not '':
                 nskipped_cubes[1] += 1
 
         # wait until all writes are finished
@@ -500,6 +505,13 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
             log_fn("Skipped {0} empty first and {1} empty second cubes".format(nskipped_cubes[0], nskipped_cubes[1]))
         else:
             log_fn("Skipped complete chunk in {0:.6f} s".format(chunk_time))
+
+        for x in cubes: del x
+        for x in write_threads: del x
+        del first_cube, second_cube, cube_data, cubes, job_info, this_job_chunk, write_threads
+
+    worker_pool.close()
+    worker_pool.join()
 
     return True
 
@@ -581,6 +593,7 @@ def downsample_cube(job_info):
 
         #down_block = np.swapaxes(down_block, 0, 1)
     #raise()
+    del this_cube
 
     if skipped_count == 8:
         return None
@@ -1194,12 +1207,13 @@ def knossos_cuber(config, log_fn):
     except ValueError:
         boundaries = None
 
-    if config.getboolean('Processing', 'perform_mag1_cubing'):
-        cubing_info = init_from_source_dir(config, log_fn)
-        all_source_files = cubing_info.all_source_files
+    perform_mag1_cubing = config.getboolean('Processing', 'perform_mag1_cubing')
+    cubing_info = init_from_source_dir(config, log_fn)
+    all_source_files = cubing_info.all_source_files
 
+    exp_name = config.get('Project', 'exp_name')
+    if perform_mag1_cubing:
         mag1_ref_time = time.time()
-
         make_mag1_cubes_from_z_stack(
             config,
             all_source_files,
@@ -1208,14 +1222,18 @@ def knossos_cuber(config, log_fn):
             cubing_info.num_z_cubes,
             cubing_info.num_passes_per_cube_layer,
             log_fn)
+    else:
+        log_fn("perform_mag1_cubing==False, skipping mag1 cubing")
+        target_path = config.get('Project', 'target_path') + "/" + exp_name
+        config.set('Project', 'target_path', target_path)
 
-        source_dims = literal_eval(config.get('Dataset', 'source_dims'))
-        boundaries = (source_dims[0], source_dims[1], len(all_source_files))
-        config.set('Dataset', 'boundaries', str(boundaries))
-        dataset_base_path = config.get('Project', 'target_path')
-        scale = literal_eval(config.get('Dataset', 'scaling'))
-        exp_name = config.get('Project', 'exp_name')
+    source_dims = literal_eval(config.get('Dataset', 'source_dims'))
+    boundaries = (source_dims[0], source_dims[1], len(all_source_files))
+    config.set('Dataset', 'boundaries', str(boundaries))
+    dataset_base_path = config.get('Project', 'target_path')
+    scale = literal_eval(config.get('Dataset', 'scaling'))
 
+    if perform_mag1_cubing:
         # this is for generating mags starting with isotropic voxels.
         # this allows for a dataset with mags other than 2x downsamplings to be created.
         # this is to get as close as possible to isotropic voxels using integer downsampling.
