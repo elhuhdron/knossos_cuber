@@ -555,7 +555,7 @@ def downsample_cube(job_info):
             #    content += fd.read(buffersize)
             content = fd.read(-1)
             fd.close()
-            this_cube = np.fromstring(content, dtype=job_info.source_dtype)
+            this_cube = np.frombuffer(content, dtype=job_info.source_dtype)
             # this_cube = np.fromfile(path_to_src_cube, dtype=job_info.source_dtype)
         else:
             # this_cube = np.array(Image.open(io.BytesIO(content)))
@@ -746,7 +746,7 @@ def compress_cube(job_info, cube_raw = None):
             #    content += fd.read(buffersize)
             content = fd.read(-1)
             fd.close()
-            cube_raw = np.fromstring(content, dtype=np.uint8)
+            cube_raw = np.frombuffer(content, dtype=np.uint8)
             #cube_raw = np.fromfile(job_info.src_cube_path, dtype=np.uint8)
         elif job_info.src_cube_path.endswith(".png"):
             cube_raw = np.array(Image.open(job_info.src_cube_path))
@@ -902,6 +902,8 @@ def init_from_source_dir(config, log_fn):
     # assumed to have equal dimensions!
     test_img = Image.open(all_source_files[0])
     test_data = np.array(test_img)
+    # xxx - hack to deal with color data, had to cube some 2p stacks
+    if test_data.ndim > 2: test_data = test_data[:,:,2]
 
     # knossos uses swapped xy axes relative to images
     test_data = np.swapaxes(test_data, 0, 1)
@@ -1082,6 +1084,8 @@ def make_mag1_cubes_from_z_stack(config,
                     PIL_image = Image.open(io.BytesIO(content))
 
                 this_layer = np.array(PIL_image)
+                # xxx - hack to deal with color data, had to cube some 2p stacks
+                if this_layer.ndim > 2: this_layer = this_layer[:,:,2]
 
                 # This stupid swap axes call costs us 50% of the image loading
                 # time. Not sure how to speed it up. np.swapaxes generates a
