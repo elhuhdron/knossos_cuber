@@ -6,9 +6,6 @@ format."
 
 """
 
-from __future__ import absolute_import, division, print_function
-# builtins is either provided by Python 3 or by the "future" module for Python 2 (http://python-future.org/)
-from builtins import range, map, zip, filter, round, next, input, bytes, hex, oct, chr, int
 from functools import reduce
 
 __author__ = 'Joergen Kornfeld'
@@ -456,7 +453,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                 print("Skipped cube {0}".format(job_info.trg_cube_path))
                 continue
 
-            if job_info.trg_cube_path2 is not '':
+            if job_info.trg_cube_path2:
                 first_cube = cube_data[:cube_edge_len, :, :]
                 second_cube = cube_data[cube_edge_len:, :, :]
             else:
@@ -480,7 +477,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                 this_thread.start()
             else:
                 nskipped_cubes[0] += 1
-            if job_info.trg_cube_path2 is not '' and np.sum(second_cube) != 0:
+            if job_info.trg_cube_path2 and np.sum(second_cube) != 0:
                 this_thread = threading.Thread(target=write_compressed_cube,
                                                args=[config,
                                                      second_cube,
@@ -488,7 +485,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                                                      job_info.trg_cube_path2])
                 write_threads.append(this_thread)
                 this_thread.start()
-            elif job_info.trg_cube_path2 is not '':
+            elif job_info.trg_cube_path2:
                 nskipped_cubes[1] += 1
 
         # wait until all writes are finished
@@ -569,7 +566,7 @@ def downsample_cube(job_info):
             this_cube = this_cube.reshape([cube_edge_len, cube_edge_len, cube_edge_len])
         except Exception as e:
             print(path_to_src_cube)
-            raise
+            raise e
 
         if job_info.config.getboolean('Processing', 'compress_source_downsampling_mag', fallback=False)\
                 and job_info.config.getint('Processing', 'first_downsampling_mag') == job_info.trg_mag:
@@ -614,7 +611,7 @@ def downsample_cube(job_info):
     # re-sampling without any filtering), especially
     # for noisy images. On top of that, the gains of more sophisticated
     # filters become less clear, and data and scaling factor dependent.
-    if job_info.trg_cube_path2 is not '':
+    if job_info.trg_cube_path2:
         zoom = [1.0, 0.5, 0.5]
     else:
         zoom = 0.5
@@ -646,7 +643,8 @@ def downsample_cube(job_info):
 
     ## use block-reduce method
     #block_size = (1,2,2) if job_info.trg_cube_path2 else (2,2,2)
-    #down_block = measure.block_reduce(down_block, block_size=block_size, func=np.median).astype(job_info.source_dtype)
+    ##down_block = measure.block_reduce(down_block, block_size=block_size, func=np.median).astype(job_info.source_dtype)
+    #down_block = measure.block_reduce(down_block, block_size=block_size, func=np.mean).astype(job_info.source_dtype)
 
     # extract directory of out_path
     #if not os.path.exists(os.path.dirname(job_info.trg_cube_path)):
@@ -1351,7 +1349,7 @@ def read_config_file(config_file):
     config = ConfigParser(allow_no_value=True)
 
     try:
-        config.readfp(open(config_file))
+        config.read_file(open(config_file))
     except IOError:
         print("Could not open config file `" + config_file + "'.")
         print("An IOError has appeared. Please check whether the "
