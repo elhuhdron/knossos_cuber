@@ -45,6 +45,11 @@ from shutil import copyfile
 
 from pathlib import Path
 
+try:
+    from msem.utils import big_img_load
+except:
+    pass
+
 #import skimage.transform
 #from skimage import measure
 
@@ -62,6 +67,7 @@ SOURCE_FORMAT_FILES = OrderedDict()
 SOURCE_FORMAT_FILES['tif'] = ['tif', 'tiff', 'TIF', 'TIFF', '*.tif, *.tiff']
 SOURCE_FORMAT_FILES['jpg'] = ['jpg', 'jpeg', 'JPG', 'JPEG', '*.jpg, *.jpeg']
 SOURCE_FORMAT_FILES['png'] = ['png', 'PNG', '*.png']
+SOURCE_FORMAT_FILES['hdf5'] = ['h5', 'H5', 'hdf5', 'HDF5', '*.h5', '*.hdf5']
 
 
 class InvalidCubingConfigError(Exception):
@@ -879,8 +885,11 @@ def init_from_source_dir(config, log_fn):
     source_files = [
         f for f in os.listdir(source_path)
         if any([f.endswith(suffix)
-            # [:-1] cuts away the description string `*.suffix'
-            for suffix in SOURCE_FORMAT_FILES[source_format][:-1]])]
+            ## [:-1] cuts away the description string `*.suffix'
+            #for suffix in SOURCE_FORMAT_FILES[source_format][:-1]])]
+            # seems that more than one wildcard specifier was subsequently added to SOURCE_FORMAT_FILES.
+            #   just remove this, a filename could not / should not contain an asterix anyways.
+            for suffix in SOURCE_FORMAT_FILES[source_format]])]
 
 
     source_path = config.get('Project', 'source_path')
@@ -898,8 +907,12 @@ def init_from_source_dir(config, log_fn):
 
     # open the first image and extract the relevant information - all images are
     # assumed to have equal dimensions!
-    test_img = Image.open(all_source_files[0])
-    test_data = np.array(test_img)
+    #test_img = Image.open(all_source_files[0])
+    #test_data = np.array(test_img)
+    if source_format == 'hdf5':
+        test_data, _ = big_img_load(all_source_files[0])
+    else:
+        test_data = np.array(Image.open(all_source_files[0]))
     # xxx - hack to deal with color data, had to cube some 2p stacks
     if test_data.ndim > 2: test_data = test_data[:,:,2]
 
@@ -1061,27 +1074,31 @@ def make_mag1_cubes_from_z_stack(config,
                 #else:
                 #ref_time = time.time()
 
-                if config.getboolean('Processing', 'use_simple_image_open'):
-                    # This is much faster on a normal workstation than the
-                    # buffering code below. Recommended solution on a cluster
-                    # is to copy the image to a memory mapped drive first
-                    # and then use PIL open on that memory mapped file.
-                    PIL_image = Image.open(all_source_files[z])
+                source_format = config.get('Dataset', 'source_format')
+                if source_format == 'hdf5':
+                    test_data, _ = big_img_load(all_source_files[z])
                 else:
-                    fsize = os.stat(all_source_files[z]).st_size
-                    buffersize = 524288//2 # optimal for soma cluster #d int/int
-                    content = b''
-                    # This is optimized code, do not think that a single line
-                    # would be faster. At least on the soma MPI cluster,
-                    # the default buffering values (read entire file into buffer
-                    # instead of smaller chunks) leads to delays and slowness.
-                    fd = io.open(all_source_files[z], 'r+b', buffering=buffersize)
-                    for i in range(0, (fsize // buffersize) + 1): #d int/int
-                        content += fd.read(buffersize)
-                    fd.close()
-                    PIL_image = Image.open(io.BytesIO(content))
+                    if config.getboolean('Processing', 'use_simple_image_open'):
+                        # This is much faster on a normal workstation than the
+                        # buffering code below. Recommended solution on a cluster
+                        # is to copy the image to a memory mapped drive first
+                        # and then use PIL open on that memory mapped file.
+                        tmp = Image.open(all_source_files[z])
+                    else:
+                        fsize = os.stat(all_source_files[z]).st_size
+                        buffersize = 524288//2 # optimal for soma cluster #d int/int
+                        content = b''
+                        # This is optimized code, do not think that a single line
+                        # would be faster. At least on the soma MPI cluster,
+                        # the default buffering values (read entire file into buffer
+                        # instead of smaller chunks) leads to delays and slowness.
+                        fd = io.open(all_source_files[z], 'r+b', buffering=buffersize)
+                        for i in range(0, (fsize // buffersize) + 1): #d int/int
+                            content += fd.read(buffersize)
+                        fd.close()
+                        tmp = Image.open(io.BytesIO(content))
+                    this_layer = np.array(tmp); del tmp
 
-                this_layer = np.array(PIL_image)
                 # xxx - hack to deal with color data, had to cube some 2p stacks
                 if this_layer.ndim > 2: this_layer = this_layer[:,:,2]
 
