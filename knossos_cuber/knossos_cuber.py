@@ -550,15 +550,15 @@ def downsample_cube(job_info):
         if job_info.from_raw:
             # Yes, I know the numpy fromfile function - this is significantly
             # faster on our cluster
-            content = ''
+            #content = ''
             #buffersize=131072*2
             fd = io.open(path_to_src_cube, 'rb')
             #             # buffering = buffersize)
             # for i in range(0, (cube_edge_len**3 / buffersize) + 1):
             #    content += fd.read(buffersize)
-            content = fd.read(-1)
+            #content = fd.read(-1)
+            this_cube = np.frombuffer(fd.read(-1), dtype=job_info.source_dtype)
             fd.close()
-            this_cube = np.frombuffer(content, dtype=job_info.source_dtype)
             # this_cube = np.fromfile(path_to_src_cube, dtype=job_info.source_dtype)
         else:
             # this_cube = np.array(Image.open(io.BytesIO(content)))
@@ -935,8 +935,8 @@ def init_from_source_dir(config, log_fn):
 
     buffer_size_in_cubes = config.getint('Processing', 'buffer_size_in_cubes')
 
-    log_fn("Dataset is %d x %d x %d knossos cubes" % \
-          (num_x_cubes, num_y_cubes, num_z_cubes))
+    log_fn("Dataset is %d x %d x %d voxels, %d x %d x %d knossos cubes" % \
+          (source_dims[0], source_dims[1], num_z, num_x_cubes, num_y_cubes, num_z_cubes))
     if num_x_cubes * num_y_cubes < buffer_size_in_cubes:
         log_fn("Buffer size sufficient for a single pass per z cube layer")
         num_passes_per_cube_layer = 1
@@ -1076,7 +1076,7 @@ def make_mag1_cubes_from_z_stack(config,
 
                 source_format = config.get('Dataset', 'source_format')
                 if source_format == 'hdf5':
-                    test_data, _ = big_img_load(all_source_files[z])
+                    this_layer, _ = big_img_load(all_source_files[z])
                 else:
                     if config.getboolean('Processing', 'use_simple_image_open'):
                         # This is much faster on a normal workstation than the
