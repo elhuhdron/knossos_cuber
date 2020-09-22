@@ -20,6 +20,7 @@ import io
 import math
 import scipy.ndimage
 import numpy as np
+import threading, queue
 import multiprocessing as mp
 from PIL import Image
 import os
@@ -1027,7 +1028,8 @@ def make_mag1_cubes_from_z_stack(config,
 
     # we iterate over the z cubes and handle cube layer after cube layer
     write_queue = mp.Queue(num_write_workers)
-    read_queue = mp.Queue(num_read_workers)
+    #read_queue = mp.Queue(num_read_workers)
+    read_queue = queue.Queue(num_read_workers)
     for cur_z in range(0, num_z_cubes):
         for cur_pass in range(0, num_passes_per_cube_layer):
             this_pass_x_start = cur_pass * num_x_cubes_per_pass * cube_edge_len
@@ -1085,9 +1087,12 @@ def make_mag1_cubes_from_z_stack(config,
 
                 read_workers = [None]*io_workers
                 for i in range(io_workers):
-                    read_workers[i] = mp.Process(target=read_zslice, args=(i, source_format,
-                            all_source_files[z+i], same_knossos_as_tif_stack_xy_orientation, source_channel,
-                            read_queue))
+                    #read_workers[i] = mp.Process(target=read_zslice, args=(i, source_format,
+                    #        all_source_files[z+i], same_knossos_as_tif_stack_xy_orientation, source_channel,
+                    #        read_queue))
+                    read_workers[i] = threading.threading(target=read_zslice, args=(i, source_format,
+                           all_source_files[z+i], same_knossos_as_tif_stack_xy_orientation, source_channel,
+                           read_queue))
                     read_workers[i].start()
                 # NOTE: only call join after queue is emptied
 
