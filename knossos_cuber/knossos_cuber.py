@@ -10,7 +10,7 @@ from functools import reduce
 
 __author__ = 'Joergen Kornfeld'
 
-import threading
+import threading, queue
 import re
 try:
     import cv2
@@ -881,6 +881,7 @@ def init_from_source_dir(config, log_fn):
 
     source_format = config.get('Dataset', 'source_format')
     source_path = config.get('Project', 'source_path')
+    source_channel = config.get('Dataset', 'source_channel')
 
     source_files = [
         f for f in os.listdir(source_path)
@@ -913,8 +914,8 @@ def init_from_source_dir(config, log_fn):
         test_data, _ = big_img_load(all_source_files[0])
     else:
         test_data = np.array(Image.open(all_source_files[0]))
-    # xxx - hack to deal with color data, had to cube some 2p stacks
-    if test_data.ndim > 2: test_data = test_data[:,:,2]
+    # allow cubing of one channel of color data
+    if test_data.ndim > 2: test_data = test_data[:,:,source_channel]
 
     # knossos uses swapped xy axes relative to images
     test_data = np.swapaxes(test_data, 0, 1)
@@ -970,6 +971,28 @@ def init_from_source_dir(config, log_fn):
     return cube_info
 
 
+read_zslice_q = queue.Queue()
+def read_zslice(local_z, source_format, source_file, same_knossos_as_tif_stack_xy_orientation, source_channel):
+    """TODO
+    """
+
+    if source_format == 'hdf5':
+        this_layer, _ = big_img_load(source_file)
+    else:
+        # xxx - implement a cacheing mechanism here, copy to /dev/shm
+        this_layer = np.array(Image.open(source_file))
+
+    # allow cubing of one channel of color data
+    if this_layer.ndim > 2: this_layer = this_layer[:,:,source_channel]
+
+    if same_knossos_as_tif_stack_xy_orientation: this_layer = this_layer.T
+
+    d = {'local_z':local_z, 'this_layer':this_layer}
+    read_zslice_q.put(d)
+
+    return
+
+
 def make_mag1_cubes_from_z_stack(config,
                                  all_source_files,
                                  num_x_cubes_per_pass,
@@ -996,7 +1019,8 @@ def make_mag1_cubes_from_z_stack(config,
         source_dtype = np.uint8
 
     source_dims = literal_eval(config.get('Dataset', 'source_dims'))
-
+    source_format = config.get('Dataset', 'source_format')
+    source_channel = config.get('Dataset', 'source_channel')
 
     same_knossos_as_tif_stack_xy_orientation = \
         config.getboolean('Dataset',
@@ -1052,83 +1076,48 @@ def make_mag1_cubes_from_z_stack(config,
             #    for z in range(cur_z*cube_edge_len, (cur_z+1)*cube_edge_len):
             #        fadvise.willneed(all_source_files[z])
 
-
             log_fn("Loading source files for pass {0}/{1}".format(cur_pass, num_passes_per_cube_layer))
             ref_time = time.time()
 
             # fill the buffer with data
-            local_z = 0
-            for z in range(cur_z * cube_edge_len, (cur_z + 1) * cube_edge_len):
+            read_threads = []
+            for local_z in range(0, cube_edge_len, num_io_threads):
+                z = cur_z*cube_edge_len + local_z
                 if z >= len(all_source_files): break
-                #try:
-                #    log_fn("Loading {0}".format(all_source_files[z]))
-                #except IndexError:
-                #    log_fn("No more image files available.")
-                #    break
 
-                #if source_format == 'raw':
-                #    this_layer = np.fromfile(all_source_files[z],
-                #                             shape=[source_dims[0],
-                #                                    source_dims[1]],
-                #                             dtype=source_dtype)
-                #else:
-                #ref_time = time.time()
-
-                source_format = config.get('Dataset', 'source_format')
-                if source_format == 'hdf5':
-                    this_layer, _ = big_img_load(all_source_files[z])
+                # queue up as many reads as io threads
+                if local_z + num_io_threads > cube_edge_len:
+                    io_threads = cube_edge_len - local_z
                 else:
-                    if config.getboolean('Processing', 'use_simple_image_open'):
-                        # This is much faster on a normal workstation than the
-                        # buffering code below. Recommended solution on a cluster
-                        # is to copy the image to a memory mapped drive first
-                        # and then use PIL open on that memory mapped file.
-                        tmp = Image.open(all_source_files[z])
+                    io_threads = num_io_threads
+                log_fn("\tReading {} slices in parallel threads".format(io_threads))
+                read_time = time.time()
+
+                for read_z in range(io_threads):
+                    this_thread = threading.Thread(target=read_zslice, args=[local_z+read_z, source_format,
+                            all_source_files[z+read_z], same_knossos_as_tif_stack_xy_orientation, source_channel])
+                    read_threads.append(this_thread)
+                    this_thread.start()
+
+                # read the results and add to the layer block
+                for read_z in range(io_threads):
+                    d = read_zslice_q.get()
+                    cur_local_z = d['local_z']
+                    this_layer = d['this_layer']
+                    s = this_layer[this_pass_x_start:this_pass_x_end,:].shape
+
+                    # copy the data for this pass into the output buffer
+                    if num_passes_per_cube_layer > 1:
+                        this_layer_out_block[cur_local_z,:s[0],:s[1]] = \
+                            this_layer[this_pass_x_start:this_pass_x_end,:]
                     else:
-                        fsize = os.stat(all_source_files[z]).st_size
-                        buffersize = 524288//2 # optimal for soma cluster #d int/int
-                        content = b''
-                        # This is optimized code, do not think that a single line
-                        # would be faster. At least on the soma MPI cluster,
-                        # the default buffering values (read entire file into buffer
-                        # instead of smaller chunks) leads to delays and slowness.
-                        fd = io.open(all_source_files[z], 'r+b', buffering=buffersize)
-                        for i in range(0, (fsize // buffersize) + 1): #d int/int
-                            content += fd.read(buffersize)
-                        fd.close()
-                        tmp = Image.open(io.BytesIO(content))
-                    this_layer = np.array(tmp); del tmp
+                        this_layer_out_block[cur_local_z,:s[0],:s[1]] = this_layer
+                    del this_layer, d
 
-                # xxx - hack to deal with color data, had to cube some 2p stacks
-                if this_layer.ndim > 2: this_layer = this_layer[:,:,2]
+                # join all the read threads, should be done since we fetched all from read queue
+                [x.join() for x in read_threads]
 
-                # This stupid swap axes call costs us 50% of the image loading
-                # time. Not sure how to speed it up. np.swapaxes generates a
-                # view, it hurts only then when you access the actual data. One
-                # could try to swap the entire out memory buffer later on,
-                # this might be faster.
-                if same_knossos_as_tif_stack_xy_orientation:
-                    this_layer = np.swapaxes(this_layer, 0, 1)
-
-                # copy the data for this pass into the output buffer
-                if num_passes_per_cube_layer > 1:
-                    this_layer_piece = this_layer[this_pass_x_start:this_pass_x_end,:]
-                    this_layer_out_block[local_z,
-                                         0:this_layer_piece.shape[0],
-                                         0:this_layer_piece.shape[1]] = this_layer_piece
-                else:
-                    # single buffer fill - this_layer_out_block is larger than
-                    # the individual data files due to the rounding to
-                    # cube_edge_len chunks, we have to avoid a dimension mismatch
-                    # therefore; it is crucial that the slowest changing index,
-                    # z, is at the first index (c-style order). The time
-                    # difference is 100x for big amounts of data!
-                    this_layer_out_block[local_z,
-                                         0:this_layer.shape[0],
-                                         0:this_layer.shape[1]] = this_layer
-
-                local_z += 1
-                #log_fn("Reading took {0}".format(time.time() - ref_time))
+                log_fn("\tParallel reading took {0}".format(time.time() - read_time))
             log_fn("Reading took {0:.2f} s".format(time.time() - ref_time))
 
             write_times = []
@@ -1176,26 +1165,11 @@ def make_mag1_cubes_from_z_stack(config,
                     #log_fn("Writing cube {0}".format(cube_full_path))
 
                     # threaded cube writing gave a speed up of a factor of 10(!!)
-                    if threading.active_count() < num_io_threads:
-                        this_thread = threading.Thread(target=write_cube,
-                                                       args=[cube_data,
-                                                             prefix,
-                                                             cube_full_path])
-
-                        write_threads.append(this_thread)
-                        this_thread.start()
-
-                    else:
-                        while threading.active_count() >= num_io_threads:
-                            time.sleep(0.001)
-                        this_thread = threading.Thread(
-                            target=write_cube,
-                            args=[cube_data,
-                                  prefix,
-                                  cube_full_path])
-
-                        write_threads.append(this_thread)
-                        this_thread.start()
+                    while threading.active_count() >= num_io_threads:
+                        time.sleep(1)
+                    this_thread = threading.Thread(target=write_cube, args=[cube_data, prefix, cube_full_path])
+                    write_threads.append(this_thread)
+                    this_thread.start()
 
                     write_times.append(time.time() - ref_time)
 
