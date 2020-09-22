@@ -10,7 +10,6 @@ from functools import reduce
 
 __author__ = 'Joergen Kornfeld'
 
-import threading, queue
 import re
 try:
     import cv2
@@ -21,7 +20,7 @@ import io
 import math
 import scipy.ndimage
 import numpy as np
-import multiprocessing
+import multiprocessing as mp
 from PIL import Image
 import os
 import itertools
@@ -224,7 +223,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     num_workers = config.getint('Processing', 'num_downsampling_cores')
     buffer_size_in_cubes_downsampling = \
         config.getint('Processing', 'buffer_size_in_cubes_downsampling')
-    num_io_threads = config.getint('Processing', 'num_write_threads')
+    num_write_workers = config.getint('Processing', 'num_write_workers')
 
     mag_matcher = re.compile(r'.*mag(?P<magID>\d+)')
     found_mags = find_mag_folders(dataset_base_path, log_fn)
@@ -325,6 +324,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     downsampling_job_info = []
     skipped_count = 0
     skip_already_cubed_downsample_layers = config.getboolean('Processing', 'skip_already_cubed_downsample_layers')
+    write_queue = mp.Queue(num_write_workers)
     for cur_x, cur_y, cur_z in itertools.product(range(0, max_x+2, 2),
                                                  range(0, max_y+2, 2),
                                                  range(0, max_z+2, 2)):
@@ -399,24 +399,12 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     if len(downsampling_job_info) == 0:
         return True
 
-    log_queue = multiprocessing.Queue()
+    log_queue = mp.Queue()
 
     job_prep_time = time.time() - job_prep_time
     log_fn("Job preparation took {0:.2f} s".format(job_prep_time))
 
-    # for job in chunked_jobs[0]:
-    #     for path in job.src_cube_paths:
-    #         path2 = path.replace("/run/media/npfeiler/", "/mnt/ariadne02/projects/sromp-1-pytr/")
-    #         print("cp -v {0} {1}".format(path2, path))
-    # for job in chunked_jobs[1]:
-    #     for path in job.src_cube_paths:
-    #         path2 = path.replace("/run/media/npfeiler/", "/mnt/ariadne02/projects/sromp-1-pytr/")
-    #         print("cp -v {0} {1}".format(path2, path))
-    # exit(0)
-
-    #worker_pool = multiprocessing.Pool(num_workers, downsample_cube_init, [log_queue])
-    ##worker_pool = multiprocessing_threads.Pool(num_workers)
-    worker_pool = multiprocessing.Pool(num_workers, downsample_cube_init, [log_queue], maxtasksperchild=num_workers)
+    worker_pool = mp.Pool(num_workers, downsample_cube_init, [log_queue], maxtasksperchild=num_workers)
 
     for chunk_id, this_job_chunk in enumerate(chunked_jobs):
         log_fn('Memory usage {0} MB'.format(get_mem_usage()))
@@ -445,7 +433,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                , (time.time() - ref_time) / len(this_job_chunk))) #d float/int
 
         log_fn("Writing (and compressing)…")
-        write_threads = []
+        write_workers = []
         cube_write_time = time.time()
         nskipped_cubes = [0,0]
         # start writing the cubes
@@ -466,43 +454,41 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                 first_cube = cube_data
                 second_cube = None
 
-            # print(cube_data.shape, first_cube.shape, second_cube.shape)
-            # exit(0)
+            if write_queue.qsize() > num_write_workers:
+                cur_worker = write_queue.get()
+                write_workers[cur_worker].join()
+                write_workers[cur_worker] = None
 
-            # One could also try multiprocessing or multiprocessing dummy
-            if threading.active_count() >= num_io_threads:
-                while threading.active_count() >= num_io_threads:
-                    time.sleep(1)
             if np.sum(first_cube) != 0:
-                this_thread = threading.Thread(target=write_compressed_cube,
-                                               args=[config,
-                                                     first_cube,
-                                                     os.path.dirname(job_info.trg_cube_path),
-                                                     job_info.trg_cube_path])
-                write_threads.append(this_thread)
-                this_thread.start()
+                cur_worker = mp.Process(target=write_compressed_cube, args=(config, first_cube,
+                    os.path.dirname(job_info.trg_cube_path), job_info.trg_cube_path,
+                    write_queue, len(write_workers)))
+                cur_worker.start()
+                write_workers.append(cur_worker)
             else:
                 nskipped_cubes[0] += 1
             if job_info.trg_cube_path2 and np.sum(second_cube) != 0:
-                this_thread = threading.Thread(target=write_compressed_cube,
-                                               args=[config,
-                                                     second_cube,
-                                                     os.path.dirname(job_info.trg_cube_path2),
-                                                     job_info.trg_cube_path2])
-                write_threads.append(this_thread)
-                this_thread.start()
+                cur_worker = mp.Process(target=write_compressed_cube, args=(config, second_cube,
+                    os.path.dirname(job_info.trg_cube_path2), job_info.trg_cube_path2,
+                    write_queue, len(write_workers)))
+                cur_worker.start()
+                write_workers.append(cur_worker)
             elif job_info.trg_cube_path2:
                 nskipped_cubes[1] += 1
 
-        # wait until all writes are finished
-        [x.join() for x in write_threads]
+        # wait until all writes are finished, empty the queue first
+        for i in range(len(write_workers)):
+            if i is not None:
+                cur_worker = write_queue.get()
+                write_workers[cur_worker].join()
+                write_workers[cur_worker] = None
 
         cube_write_time = time.time() - cube_write_time
         chunk_time = time.time() - chunk_time
 
-        if len(write_threads) > 0:
+        if len(write_workers) > 0:
             log_fn("Writing {0} cubes took {1:.2f} s (on avg {2} s per cube)"
-                   .format(len(write_threads), cube_write_time, cube_write_time / len(write_threads)))
+                   .format(len(write_workers), cube_write_time, cube_write_time / len(write_workers)))
             log_fn("Processing chunk took {0:.2f} s (on avg per cube {1} s)"
                    .format(chunk_time, chunk_time / len(this_job_chunk)))
             log_fn("Skipped {0} empty first and {1} empty second cubes".format(nskipped_cubes[0], nskipped_cubes[1]))
@@ -510,8 +496,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
             log_fn("Skipped complete chunk in {0:.6f} s".format(chunk_time))
 
         for x in cubes: del x
-        for x in write_threads: del x
-        del first_cube, second_cube, cube_data, cubes, job_info, this_job_chunk, write_threads
+        del first_cube, second_cube, cube_data, cubes, job_info, this_job_chunk
 
     worker_pool.close()
     worker_pool.join()
@@ -696,9 +681,9 @@ def compress_dataset(config, log_fn):
         compress_job_infos.append(this_job_info)
 
     log_fn("Starting {0} workers...".format(num_workers))
-    log_queue = multiprocessing.Queue()
+    log_queue = mp.Queue()
 
-    worker_pool = multiprocessing.Pool(num_workers, compress_cube_init, [log_queue])
+    worker_pool = mp.Pool(num_workers, compress_cube_init, [log_queue])
     # distribute cubes to worker pool
     #async_result = worker_pool.map(compress_cube, compress_job_infos, chunksize=10)
     worker_pool.map(compress_cube, compress_job_infos, chunksize=10)
@@ -803,7 +788,7 @@ def compress_cube_init(log_queue):
     compress_cube.log_queue = log_queue
 
 
-def write_compressed_cube(config, cube_data, prefix, cube_full_path):
+def write_compressed_cube(config, cube_data, prefix, cube_full_path, write_queue, worker_count):
     # write_cube(cube_data, prefix, cube_full_path) # TODO
     if not os.path.exists(prefix):
         os.makedirs(prefix)
@@ -821,12 +806,13 @@ def write_compressed_cube(config, cube_data, prefix, cube_full_path):
     this_job_info.pre_gauss = config.getfloat('Compression', 'pre_comp_gauss_filter')
 
     if 'raw' in this_job_info.compressor:
-        write_cube(cube_data, prefix, cube_full_path)
+        write_cube(cube_data, prefix, cube_full_path, write_queue, worker_count)
     if this_job_info.compressor != 'raw':
         compress_cube(this_job_info, cube_data)
+        write_queue.put(worker_count)
 
 
-def write_cube(cube_data, prefix, cube_full_path):
+def write_cube(cube_data, prefix, cube_full_path, write_queue, worker_count):
     """TODO
     """
 
@@ -841,6 +827,7 @@ def write_cube(cube_data, prefix, cube_full_path):
         # no log_fn due to multithreading
         print("Could not write cube: {0}".format(cube_full_path))
 
+    write_queue.put(worker_count)
     return
 
 
@@ -971,8 +958,8 @@ def init_from_source_dir(config, log_fn):
     return cube_info
 
 
-read_zslice_q = queue.Queue()
-def read_zslice(local_z, source_format, source_file, same_knossos_as_tif_stack_xy_orientation, source_channel):
+def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_tif_stack_xy_orientation,
+        source_channel, read_queue):
     """TODO
     """
 
@@ -988,8 +975,8 @@ def read_zslice(local_z, source_format, source_file, same_knossos_as_tif_stack_x
 
     if same_knossos_as_tif_stack_xy_orientation: this_layer = this_layer.T
 
-    d = {'local_z':local_z, 'this_layer':this_layer}
-    read_zslice_q.put(d)
+    d = {'local_z':local_z, 'this_layer':this_layer, 'iworker':iworker}
+    read_queue.put(d)
     print("worker local_z {} finished in {}".format(local_z, time.time()-t))
 
     return
@@ -1028,8 +1015,8 @@ def make_mag1_cubes_from_z_stack(config,
         config.getboolean('Dataset',
                           'same_knossos_as_tif_stack_xy_orientation')
 
-    num_read_threads = config.getint('Processing', 'num_read_threads')
-    num_write_threads = config.getint('Processing', 'num_write_threads')
+    num_read_workers = config.getint('Processing', 'num_read_workers')
+    num_write_workers = config.getint('Processing', 'num_write_workers')
 
     # this is for generating mags starting with isotropic voxels.
     # this allows for a dataset with mags other than 2x downsamplings to be created.
@@ -1039,6 +1026,8 @@ def make_mag1_cubes_from_z_stack(config,
     num_x_cubes = num_x_cubes_per_pass*num_passes_per_cube_layer
 
     # we iterate over the z cubes and handle cube layer after cube layer
+    write_queue = mp.Queue(num_write_workers)
+    read_queue = mp.Queue(num_read_workers)
     for cur_z in range(0, num_z_cubes):
         for cur_pass in range(0, num_passes_per_cube_layer):
             this_pass_x_start = cur_pass * num_x_cubes_per_pass * cube_edge_len
@@ -1083,48 +1072,53 @@ def make_mag1_cubes_from_z_stack(config,
             ref_time = time.time()
 
             # fill the buffer with data
-            read_threads = []
-            for local_z in range(0, cube_edge_len, num_read_threads):
+            for local_z in range(0, cube_edge_len, num_read_workers):
                 z = cur_z*cube_edge_len + local_z
                 if z >= len(all_source_files): break
 
-                # queue up as many reads as io threads
-                if local_z + num_read_threads > cube_edge_len:
-                    io_threads = cube_edge_len - local_z
+                if local_z + num_read_workers > cube_edge_len:
+                    io_workers = cube_edge_len - local_z
                 else:
-                    io_threads = num_read_threads
-                log_fn("\tReading {} slices in parallel threads".format(io_threads))
+                    io_workers = num_read_workers
+                log_fn("\tReading {} slices in parallel workers".format(io_workers))
                 read_time = time.time()
 
-                for read_z in range(io_threads):
-                    this_thread = threading.Thread(target=read_zslice, args=[local_z+read_z, source_format,
-                            all_source_files[z+read_z], same_knossos_as_tif_stack_xy_orientation, source_channel])
-                    read_threads.append(this_thread)
-                    this_thread.start()
+                read_workers = [None]*io_workers
+                for i in range(io_workers):
+                    read_workers[i] = mp.Process(target=read_zslice, args=(i, local_z, source_format,
+                            all_source_files[z+i], same_knossos_as_tif_stack_xy_orientation, source_channel,
+                            read_queue))
+                    read_workers[i].start()
+                # NOTE: only call join after queue is emptied
 
-                # read the results and add to the layer block
-                for read_z in range(io_threads):
-                    d = read_zslice_q.get()
+                dt = time.time()
+                print_every = io_workers
+                worker_cnts = np.zeros((io_workers,), dtype=np.int64)
+                for i in range(io_workers):
+                    if i>0 and i%print_every==0:
+                        print('%d through q in %.3f s, worker_cnts:' % (print_every, time.time()-dt,)); dt = time.time()
+                        print(worker_cnts)
+                    d = read_queue.get()
+
                     cur_local_z = d['local_z']
                     this_layer = d['this_layer']
                     s = this_layer[this_pass_x_start:this_pass_x_end,:].shape
-
                     # copy the data for this pass into the output buffer
                     if num_passes_per_cube_layer > 1:
                         this_layer_out_block[cur_local_z,:s[0],:s[1]] = \
                             this_layer[this_pass_x_start:this_pass_x_end,:]
                     else:
                         this_layer_out_block[cur_local_z,:s[0],:s[1]] = this_layer
+                    worker_cnts[d['iworker']] += 1
                     del this_layer, d
-
-                # join all the read threads, should be done since we fetched all from read queue
-                [x.join() for x in read_threads]
+                assert(read_queue.empty())
+                [x.join() for x in read_workers]
 
                 log_fn("\tParallel reading took {0}".format(time.time() - read_time))
             log_fn("Reading took {0:.2f} s".format(time.time() - ref_time))
 
-            write_times = []
-            write_threads = []
+            twrite = time.time()
+            write_workers = []
 
             # write out the cubes for this z-cube layer and buffer
             nskipped_cubes = 0
@@ -1167,21 +1161,27 @@ def make_mag1_cubes_from_z_stack(config,
 
                     #log_fn("Writing cube {0}".format(cube_full_path))
 
-                    # threaded cube writing gave a speed up of a factor of 10(!!)
-                    while threading.active_count() >= num_write_threads:
-                        time.sleep(1)
-                    this_thread = threading.Thread(target=write_cube, args=[cube_data, prefix, cube_full_path])
-                    write_threads.append(this_thread)
-                    this_thread.start()
+                    if write_queue.qsize() > num_write_workers:
+                        cur_worker = write_queue.get()
+                        write_workers[cur_worker].join()
+                        write_workers[cur_worker] = None
 
-                    write_times.append(time.time() - ref_time)
+                    cur_worker = mp.Process(target=write_cube, args=(cube_data, prefix, cube_full_path,
+                            write_queue, len(write_workers)))
+                    cur_worker.start()
+                    write_workers.append(cur_worker)
+                #for cur_y in range(0, num_y_cubes):
+            #for cur_x in range(0, num_x_cubes_per_pass):
 
-            log_fn("Writing took {0:.2f} s (on avg per cube: {1} s)"
-                   .format(np.sum(write_times), np.mean(write_times)))
+            # wait until all writes are finished, empty the queue first
+            for i in range(len(write_workers)):
+                if i is not None:
+                    cur_worker = write_queue.get()
+                    write_workers[cur_worker].join()
+                    write_workers[cur_worker] = None
+
+            log_fn("Writing took {0:.2f} s".format(time.time()-twrite))
             log_fn("Skipped {0} empty cubes".format(nskipped_cubes))
-
-            # wait until all writes are finished for this layer
-            [x.join() for x in write_threads]
 
 
 def knossos_cuber(config, log_fn):
