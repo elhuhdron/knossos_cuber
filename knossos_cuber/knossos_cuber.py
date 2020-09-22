@@ -224,7 +224,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     num_workers = config.getint('Processing', 'num_downsampling_cores')
     buffer_size_in_cubes_downsampling = \
         config.getint('Processing', 'buffer_size_in_cubes_downsampling')
-    num_io_threads = config.getint('Processing', 'num_io_threads')
+    num_io_threads = config.getint('Processing', 'num_write_threads')
 
     mag_matcher = re.compile(r'.*mag(?P<magID>\d+)')
     found_mags = find_mag_folders(dataset_base_path, log_fn)
@@ -472,7 +472,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
             # One could also try multiprocessing or multiprocessing dummy
             if threading.active_count() >= num_io_threads:
                 while threading.active_count() >= num_io_threads:
-                    time.sleep(0.001)
+                    time.sleep(1)
             if np.sum(first_cube) != 0:
                 this_thread = threading.Thread(target=write_compressed_cube,
                                                args=[config,
@@ -976,6 +976,7 @@ def read_zslice(local_z, source_format, source_file, same_knossos_as_tif_stack_x
     """TODO
     """
 
+    print("worker local_z {} started".format(local_z)); t = time.time()
     if source_format == 'hdf5':
         this_layer, _ = big_img_load(source_file)
     else:
@@ -989,6 +990,7 @@ def read_zslice(local_z, source_format, source_file, same_knossos_as_tif_stack_x
 
     d = {'local_z':local_z, 'this_layer':this_layer}
     read_zslice_q.put(d)
+    print("worker local_z {} finished in {}".format(local_z, time.time()-t))
 
     return
 
@@ -1026,7 +1028,8 @@ def make_mag1_cubes_from_z_stack(config,
         config.getboolean('Dataset',
                           'same_knossos_as_tif_stack_xy_orientation')
 
-    num_io_threads = config.getint('Processing', 'num_io_threads')
+    num_read_threads = config.getint('Processing', 'num_read_threads')
+    num_write_threads = config.getint('Processing', 'num_write_threads')
 
     # this is for generating mags starting with isotropic voxels.
     # this allows for a dataset with mags other than 2x downsamplings to be created.
@@ -1081,15 +1084,15 @@ def make_mag1_cubes_from_z_stack(config,
 
             # fill the buffer with data
             read_threads = []
-            for local_z in range(0, cube_edge_len, num_io_threads):
+            for local_z in range(0, cube_edge_len, num_read_threads):
                 z = cur_z*cube_edge_len + local_z
                 if z >= len(all_source_files): break
 
                 # queue up as many reads as io threads
-                if local_z + num_io_threads > cube_edge_len:
+                if local_z + num_read_threads > cube_edge_len:
                     io_threads = cube_edge_len - local_z
                 else:
-                    io_threads = num_io_threads
+                    io_threads = num_read_threads
                 log_fn("\tReading {} slices in parallel threads".format(io_threads))
                 read_time = time.time()
 
@@ -1165,7 +1168,7 @@ def make_mag1_cubes_from_z_stack(config,
                     #log_fn("Writing cube {0}".format(cube_full_path))
 
                     # threaded cube writing gave a speed up of a factor of 10(!!)
-                    while threading.active_count() >= num_io_threads:
+                    while threading.active_count() >= num_write_threads:
                         time.sleep(1)
                     this_thread = threading.Thread(target=write_cube, args=[cube_data, prefix, cube_full_path])
                     write_threads.append(this_thread)
