@@ -958,12 +958,12 @@ def init_from_source_dir(config, log_fn):
     return cube_info
 
 
-def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_tif_stack_xy_orientation,
+def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_xy_orientation,
         source_channel, read_queue):
     """TODO
     """
 
-    print("worker local_z {} started".format(local_z)); t = time.time()
+    print("worker {} started".format(iworker)); t = time.time()
     if source_format == 'hdf5':
         this_layer, _ = big_img_load(source_file)
     else:
@@ -975,9 +975,9 @@ def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_ti
 
     if same_knossos_as_tif_stack_xy_orientation: this_layer = this_layer.T
 
-    d = {'local_z':local_z, 'this_layer':this_layer, 'iworker':iworker}
+    d = {'this_layer':this_layer, 'iworker':iworker}
     read_queue.put(d)
-    print("worker local_z {} finished in {}".format(local_z, time.time()-t))
+    print("worker {} finished in {}".format(iworker, time.time()-t))
 
     return
 
@@ -1085,7 +1085,7 @@ def make_mag1_cubes_from_z_stack(config,
 
                 read_workers = [None]*io_workers
                 for i in range(io_workers):
-                    read_workers[i] = mp.Process(target=read_zslice, args=(i, local_z, source_format,
+                    read_workers[i] = mp.Process(target=read_zslice, args=(i, source_format,
                             all_source_files[z+i], same_knossos_as_tif_stack_xy_orientation, source_channel,
                             read_queue))
                     read_workers[i].start()
@@ -1100,7 +1100,7 @@ def make_mag1_cubes_from_z_stack(config,
                         print(worker_cnts)
                     d = read_queue.get()
 
-                    cur_local_z = d['local_z']
+                    cur_local_z = local_z + d['iworker']
                     this_layer = d['this_layer']
                     s = this_layer[this_pass_x_start:this_pass_x_end,:].shape
                     # copy the data for this pass into the output buffer
