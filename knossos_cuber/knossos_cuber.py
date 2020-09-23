@@ -960,7 +960,7 @@ def init_from_source_dir(config, log_fn):
 
 
 def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_xy_orientation,
-        source_channel, block_ranges, read_queue):
+        source_channel, block_ranges, xpass_range, read_queue):
     """TODO
     """
 
@@ -979,8 +979,19 @@ def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_x
     # this is to avoid the 2GB limit for serializing into multiprocessing queues
     b = block_ranges
     for x in range(len(b[0])):
+        sx = b[0][x][1] - b[0][x][0]
         for y in range(len(b[1])):
-            d = {'chunk':this_layer[b[0][x][0]:b[0][x][1],b[1][y][0]:b[1][y][1]], 'iworker':iworker, 'x':x, 'y':y}
+            # only pass back the portion of the layer that we need,
+            #   in the case that we have to do multiple passes per layer.
+            if b[0][x][0] < xpass_range[1] and b[0][x][1] > xpass_range[0]:
+                bdx = [max(b[0][x][0],xpass_range[0]), min(b[0][x][1],xpass_range[1])]
+                bcx = [(xpass_range[0] - b[0][x][0]) if b[0][x][0] < xpass_range[0] else 0,
+                    (sx - b[0][x][1] + xpass_range[1]) if b[0][x][1] > xpass_range[1] else sx]
+                chunk = this_layer[bcx[0]:bcx[1],b[1][y][0]:b[1][y][1]]
+            else:
+                chunk = bdx = None
+
+            d = {'chunk':chunk, 'iworker':iworker, 'bdx':bdx, 'y':y}
             read_queue.put(d)
     print("worker {} finished in {}".format(iworker, time.time()-t))
 
@@ -1054,10 +1065,9 @@ def make_mag1_cubes_from_z_stack(config,
     read_queue = mp.Queue(num_read_workers)
     for cur_z in range(0, num_z_cubes):
         for cur_pass in range(0, num_passes_per_cube_layer):
-            this_pass_x_start = cur_pass * num_x_cubes_per_pass * cube_edge_len
-            this_pass_x_end = (cur_pass+1) * num_x_cubes_per_pass * cube_edge_len
-            if this_pass_x_end > source_shape[0]:
-                this_pass_x_end = source_shape[0]
+            xpass_range = [cur_pass * num_x_cubes_per_pass * cube_edge_len,
+                           (cur_pass+1) * num_x_cubes_per_pass * cube_edge_len]
+            if xpass_range[1] > source_shape[0]: xpass_range[1] = source_shape[0]
 
             if skip_already_cubed_layers:
                 # check the middle of x,y for an existing cube,
@@ -1106,7 +1116,7 @@ def make_mag1_cubes_from_z_stack(config,
                 for i in range(io_workers):
                     read_workers[i] = mp.Process(target=read_zslice, args=(i, source_format,
                            all_source_files[z+i], same_knossos_as_tif_stack_xy_orientation, source_channel,
-                           block_ranges, read_queue))
+                           block_ranges, xpass_range, read_queue))
                     read_workers[i].start()
                 # NOTE: only call join after queue is emptied
 
@@ -1121,17 +1131,9 @@ def make_mag1_cubes_from_z_stack(config,
                     d = read_queue.get()
 
                     cur_local_z = local_z + d['iworker']
-                    # copy the data for this pass into the output buffer
-                    s = d['chunk'].shape
-                    if num_passes_per_cube_layer > 1:
-                        if b[0][d['x']][0] < this_pass_x_end and b[0][d['x']][1] > this_pass_x_start:
-                            bdx = [max(b[0][d['x']][0],this_pass_x_start),min(b[0][d['x']][1],this_pass_x_end)]
-                            bcx = [(this_pass_x_start-b[0][d['x']][0]) if b[0][d['x']][0] < this_pass_x_start else 0,
-                                (s[0]-b[0][d['x']][1]+this_pass_x_end) if b[0][d['x']][1] > this_pass_x_end else s[0]]
-                            this_layer_out_block[cur_local_z,bdx[0]:bdx[1],b[1][d['y']][0]:b[1][d['y']][1]] = \
-                                d['chunk'][bcx[0]:bcx[1],:]
-                    else:
-                        this_layer_out_block[cur_local_z,b[0][d['x']][0]:b[0][d['x']][1],
+                    # the chunk only gets passed back from the reading process if we need it for this x pass.
+                    if d['chunk'] is not None:
+                        this_layer_out_block[cur_local_z, d['bdx'][0]:d['dbx'][1],
                             b[1][d['y']][0]:b[1][d['y']][1]] = d['chunk']
                     worker_cnts[d['iworker']] += 1
                     del d
