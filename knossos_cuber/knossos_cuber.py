@@ -990,12 +990,12 @@ def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_ti
         if this_layer.ndim > 2: this_layer = this_layer[:,:,source_channel]
         if same_knossos_as_tif_stack_xy_orientation: this_layer = this_layer.T
 
-    # this is to avoid the 2GB limit for serializing into multiprocessing queues
+    # the blocking is a throwback for using queues (2GB item limit) instead of shared memory.
     b = block_ranges
     for x in range(len(b[0])):
         sx = b[0][x][1] - b[0][x][0]
         for y in range(len(b[1])):
-            # only pass back the portion of the layer that we need,
+            # only assign the portion of the layer that we need,
             #   in the case that we have to do multiple passes per layer.
             if b[0][x][0] < xpass_range[1] and b[0][x][1] > xpass_range[0]:
                 bdx = [max(b[0][x][0],xpass_range[0]), min(b[0][x][1],xpass_range[1])]
@@ -1010,16 +1010,15 @@ def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_ti
                     if same_knossos_as_tif_stack_xy_orientation: chunk = chunk.T
                 else:
                     chunk = this_layer[bcx[0]:bcx[1],b[1][y][0]:b[1][y][1]]
-                if this_layer_out_block is not None:
-                    this_layer_out_block[iworker + local_z, bdx[0]:bdx[1], b[1][y][0]:b[1][y][1]] = chunk
+                this_layer_out_block[iworker + local_z, bdx[0]:bdx[1], b[1][y][0]:b[1][y][1]] = chunk
+                if x==len(b[0])-1 and y==len(b[1])-1:
                     # zero-fill the remainder of the block
                     this_layer_out_block[iworker + local_z, bdx[1]:, b[1][y][1]:] = 0
-                    chunk = bdx = None
-            else:
-                chunk = bdx = None
-
-            d = {'chunk':chunk, 'iworker':iworker, 'bdx':bdx, 'y':y}
+            #if b[0][x][0] < xpass_range[1] and b[0][x][1] > xpass_range[0]:
+            d = {'iworker':iworker,}
             read_queue.put(d)
+        #for y in range(len(b[1])):
+    #for x in range(len(b[0])):
     #print("worker {} finished in {}".format(iworker, time.time()-t))
 
     return
@@ -1031,8 +1030,7 @@ def make_mag1_cubes_from_z_stack(config,
                                  num_y_cubes,
                                  num_z_cubes,
                                  num_passes_per_cube_layer,
-                                 log_fn,
-                                 use_mp_queue=False):
+                                 log_fn):
     """TODO
     """
 
@@ -1060,10 +1058,11 @@ def make_mag1_cubes_from_z_stack(config,
     same_knossos_as_tif_stack_xy_orientation = \
         config.getboolean('Dataset', 'same_knossos_as_tif_stack_xy_orientation')
 
-    # this is for the multiprocessing reads, queued items over 2GB can not be serialized.
-    max_size = 2**31-1
+    # the blocking is a throwback for using queues (2GB item limit) instead of shared memory.
+    #max_size = 2**31-1
+    max_size = None
     size = source_shape[0]*source_shape[1]*source_bytes
-    if not use_mp_queue or size < max_size:
+    if max_size is None or size < max_size:
         nblks = [1,1]
     else:
         # create number of blocks in each dimension that is proportional to their sizes
@@ -1086,22 +1085,22 @@ def make_mag1_cubes_from_z_stack(config,
     # this is to get as close as possible to isotropic voxels using integer downsampling.
     first_mag = config.getint('Processing', 'first_mag')
 
-    num_x_cubes = num_x_cubes_per_pass*num_passes_per_cube_layer
-
-    # we iterate over the z cubes and handle cube layer after cube layer
+    # inits for multiprocessing in the z-loop
     write_queue = mp.Queue(num_write_workers)
     read_queue = mp.Queue(num_read_workers)
-    if not use_mp_queue:
-        # use shared memory for parallel reads
-        block_size = cube_edge_len**3 * num_x_cubes_per_pass * num_y_cubes
-        smm = managers.SharedMemoryManager()
-        smm.start()  # Start the process that manages the shared memory blocks
-        shm = smm.SharedMemory(size=block_size*source_bytes)
-        this_layer_out_block = np.ndarray(
-            [cube_edge_len,
-             num_x_cubes_per_pass * cube_edge_len,
-             num_y_cubes * cube_edge_len],
-            dtype=source_dtype, buffer=shm.buf)
+    # use shared memory for parallel reads
+    block_size = cube_edge_len**3 * num_x_cubes_per_pass * num_y_cubes
+    smm = managers.SharedMemoryManager()
+    smm.start()  # Start the process that manages the shared memory blocks
+    shm = smm.SharedMemory(size=block_size*source_bytes)
+    this_layer_out_block = np.ndarray(
+        [cube_edge_len,
+         num_x_cubes_per_pass * cube_edge_len,
+         num_y_cubes * cube_edge_len],
+        dtype=source_dtype, buffer=shm.buf)
+
+    # we iterate over the z cubes and handle cube layer after cube layer
+    num_x_cubes = num_x_cubes_per_pass*num_passes_per_cube_layer
     for cur_z in range(0, num_z_cubes):
         for cur_pass in range(0, num_passes_per_cube_layer):
             xpass_range = [cur_pass * num_x_cubes_per_pass * cube_edge_len,
@@ -1127,22 +1126,14 @@ def make_mag1_cubes_from_z_stack(config,
                     print(cube_full_path)
                     continue
 
-            if use_mp_queue:
-                # allocate memory for this layer
-                this_layer_out_block = np.zeros(
-                    [cube_edge_len,
-                     num_x_cubes_per_pass * cube_edge_len,
-                     num_y_cubes * cube_edge_len],
-                    dtype=source_dtype)
             log_fn("Loading source files for pass {0}/{1}".format(cur_pass, num_passes_per_cube_layer))
             ref_time = time.time()
             for local_z in range(0, cube_edge_len, num_read_workers):
                 z = cur_z*cube_edge_len + local_z
                 if z >= len(all_source_files):
-                    if not use_mp_queue:
-                        log_fn("\tFilling remaining z in shared memory"); fill_time = time.time()
-                        this_layer_out_block[local_z:,:,:] = 0
-                        log_fn("\t\tdone in {:.2f}".format(time.time()-fill_time))
+                    log_fn("\tZero-filling remainder z layers"); fill_time = time.time()
+                    this_layer_out_block[local_z:,:,:] = 0
+                    log_fn("\t\tdone in {:.2f}".format(time.time()-fill_time))
                     break
 
                 if local_z + num_read_workers > cube_edge_len:
@@ -1158,27 +1149,19 @@ def make_mag1_cubes_from_z_stack(config,
                 for i in range(io_workers):
                     read_workers[i] = mp.Process(target=read_zslice, args=(i, local_z, source_format,
                            all_source_files[z+i], same_knossos_as_tif_stack_xy_orientation, source_channel,
-                           block_ranges, xpass_range, read_queue, None if use_mp_queue else this_layer_out_block))
+                           block_ranges, xpass_range, read_queue, this_layer_out_block))
                     read_workers[i].start()
                 # NOTE: only call join after queue is emptied
 
                 dt = time.time()
                 print_every = io_workers*ntblks # to disable prints here
                 worker_cnts = np.zeros((io_workers,), dtype=np.int64)
-                b = block_ranges
                 for i in range(io_workers*ntblks):
                     if i>0 and i%print_every==0:
                         print('%d through q in %.3f s, worker_cnts:' % (print_every, time.time()-dt,))
                         print(worker_cnts); dt = time.time()
                     d = read_queue.get()
-
-                    cur_local_z = local_z + d['iworker']
-                    # the chunk only gets passed back from the reading process if we need it for this x pass.
-                    if d['chunk'] is not None:
-                        this_layer_out_block[cur_local_z, d['bdx'][0]:d['bdx'][1],
-                            b[1][d['y']][0]:b[1][d['y']][1]] = d['chunk']
                     worker_cnts[d['iworker']] += 1
-                    del d
                 assert(read_queue.empty())
                 [x.join() for x in read_workers]
 
@@ -1253,8 +1236,7 @@ def make_mag1_cubes_from_z_stack(config,
 
         #for cur_pass in range(0, num_passes_per_cube_layer):
     #for cur_z in range(0, num_z_cubes):
-    if not use_mp_queue:
-        smm.shutdown()  # Calls unlink() on sl, raw_shm, and another_sl
+    smm.shutdown()  # Calls unlink() on sl, raw_shm, and another_sl
 
 
 def knossos_cuber(config, log_fn):
