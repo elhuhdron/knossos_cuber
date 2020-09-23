@@ -21,6 +21,7 @@ import math
 import scipy.ndimage
 import numpy as np
 import multiprocessing as mp
+from multiprocessing import managers
 from PIL import Image
 import os
 import itertools
@@ -1011,6 +1012,8 @@ def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_ti
                     chunk = this_layer[bcx[0]:bcx[1],b[1][y][0]:b[1][y][1]]
                 if this_layer_out_block is not None:
                     this_layer_out_block[iworker + local_z, bdx[0]:bdx[1], b[1][y][0]:b[1][y][1]] = chunk
+                    # zero-fill the remainder of the block
+                    this_layer_out_block[iworker + local_z, bdx[1]:, b[1][y][1]:] = 0
                     chunk = bdx = None
             else:
                 chunk = bdx = None
@@ -1091,9 +1094,9 @@ def make_mag1_cubes_from_z_stack(config,
     if not use_mp_queue:
         # use shared memory for parallel reads
         block_size = cube_edge_len**3 * num_x_cubes_per_pass * num_y_cubes
-        smm = mp.shared_memory.SharedMemoryManager()
+        smm = managers.SharedMemoryManager()
         smm.start()  # Start the process that manages the shared memory blocks
-        shm = smm.SharedMemory(create=True, size=block_size*source_bytes)
+        shm = smm.SharedMemory(size=block_size*source_bytes)
         this_layer_out_block = np.ndarray(
             [cube_edge_len,
              num_x_cubes_per_pass * cube_edge_len,
@@ -1131,16 +1134,16 @@ def make_mag1_cubes_from_z_stack(config,
                      num_x_cubes_per_pass * cube_edge_len,
                      num_y_cubes * cube_edge_len],
                     dtype=source_dtype)
-            else:
-                this_layer_out_block.fill(0)
-
             log_fn("Loading source files for pass {0}/{1}".format(cur_pass, num_passes_per_cube_layer))
             ref_time = time.time()
-
-            # fill the buffer with data
             for local_z in range(0, cube_edge_len, num_read_workers):
                 z = cur_z*cube_edge_len + local_z
-                if z >= len(all_source_files): break
+                if z >= len(all_source_files):
+                    if not use_mp_queue:
+                        log_fn("\tFilling remaining z in shared memory"); fill_time = time.time()
+                        this_layer_out_block[local_z:,:,:] = 0
+                        log_fn("\t\tdone in {:.2f}".format(time.time()-fill_time))
+                    break
 
                 if local_z + num_read_workers > cube_edge_len:
                     io_workers = cube_edge_len - local_z
