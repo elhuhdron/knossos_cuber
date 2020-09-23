@@ -1054,6 +1054,7 @@ def make_mag1_cubes_from_z_stack(config,
     source_shape = literal_eval(config.get('Dataset', 'source_dims'))
     source_format = config.get('Dataset', 'source_format')
     source_channel = config.get('Dataset', 'source_channel')
+    num_z = len(all_source_files)
 
     same_knossos_as_tif_stack_xy_orientation = \
         config.getboolean('Dataset', 'same_knossos_as_tif_stack_xy_orientation')
@@ -1130,11 +1131,7 @@ def make_mag1_cubes_from_z_stack(config,
             ref_time = time.time()
             for local_z in range(0, cube_edge_len, num_read_workers):
                 z = cur_z*cube_edge_len + local_z
-                if z >= len(all_source_files):
-                    log_fn("\tZero-filling remainder z layers"); fill_time = time.time()
-                    this_layer_out_block[local_z:,:,:] = 0
-                    log_fn("\t\tdone in {:.2f}".format(time.time()-fill_time))
-                    break
+                if z >= num_z: break
 
                 if local_z + num_read_workers > cube_edge_len:
                     io_workers = cube_edge_len - local_z
@@ -1167,6 +1164,9 @@ def make_mag1_cubes_from_z_stack(config,
 
                 log_fn("\tParallel reading took {:.2f} s".format(time.time() - read_time))
             log_fn("Reading took {0:.2f} s".format(time.time() - ref_time))
+            # zero-fill remainder slices in last cube
+            if cur_z == num_z_cubes-1 and num_z_cubes*cube_edge_len > num_z:
+                this_layer_out_block[num_z-(num_z_cubes-1)*cube_edge_len:,:,:] = 0
 
 
             # write out the cubes for this z-cube layer and buffer
