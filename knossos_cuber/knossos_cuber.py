@@ -44,10 +44,7 @@ from shutil import copyfile
 
 from pathlib import Path
 
-try:
-    from msem.utils import big_img_load
-except:
-    pass
+import h5py
 
 #import skimage.transform
 #from skimage import measure
@@ -95,6 +92,23 @@ class CompressionJobInfo(object):
         self.open_jpeg_bin_path = ''
         self.cube_edge_len = 128
 
+
+def big_img_info(fn, dataset='image'):
+    fh = h5py.File(fn, 'r')
+    image = fh[dataset]
+    img_shape = image.shape; img_dtype = image.dtype
+    fh.close()
+    return img_shape, img_dtype
+
+def big_img_load(fn, dataset='image', rng=None):
+    fh = h5py.File(fn, 'r')
+    image = fh[dataset]
+    if rng is None: rng = [[0,image.shape[0]], [0,image.shape[1]]]
+    shape = [x[1] - x[0] for x in rng]
+    img_blk = np.empty(shape, dtype=image.dtype)
+    image.read_direct(img_blk, source_sel=np.s_[rng[0][0]:rng[0][1],rng[1][0]:rng[1][1]])
+    fh.close()
+    return img_blk
 
 def get_list_of_all_cubes_in_dataset(dataset_base_path, log_fn):
     """TODO
@@ -895,22 +909,26 @@ def init_from_source_dir(config, log_fn):
 
     # open the first image and extract the relevant information - all images are
     # assumed to have equal dimensions!
-    log_fn("Loading first image to get dimensions"); t = time.time()
+    same_knossos_as_tif_stack_xy_orientation = \
+        config.getboolean('Dataset', 'same_knossos_as_tif_stack_xy_orientation')
     if source_format == 'hdf5':
-        test_data, _ = big_img_load(all_source_files[0])
+        source_dims, source_dtype = big_img_info(all_source_files[0])
+        if same_knossos_as_tif_stack_xy_orientation:
+            source_dims = source_dims[::-1]
     else:
+        log_fn("Loading first image to get dimensions"); t = time.time()
         test_data = np.array(Image.open(all_source_files[0]))
-    # allow cubing of one channel of color data
-    if test_data.ndim > 2: test_data = test_data[:,:,source_channel]
-    log_fn("\t done in {:.2f} s".format(time.time()-t,))
+        # allow cubing of one channel of color data
+        if test_data.ndim > 2: test_data = test_data[:,:,source_channel]
+        # knossos uses swapped xy axes relative to images
+        if same_knossos_as_tif_stack_xy_orientation:
+            test_data = np.swapaxes(test_data, 0, 1)
+        source_dims = test_data.shape
+        source_dtype = test_data.dtype
+        log_fn("\t done in {:.2f} s".format(time.time()-t,))
 
-    # knossos uses swapped xy axes relative to images
-    if config.getboolean('Dataset', 'same_knossos_as_tif_stack_xy_orientation'):
-        test_data = np.swapaxes(test_data, 0, 1)
-
-    source_dims = test_data.shape
-    config.set('Dataset', 'source_dims', str(test_data.shape))
-    config.set('Dataset', 'source_dtype', str(test_data.dtype))
+    config.set('Dataset', 'source_dims', str(source_dims))
+    config.set('Dataset', 'source_dtype', str(source_dtype))
 
     #q (important for division below!) Why getfloat, not getint? It is int in the config.ini and that would make more sense.
     cube_edge_len = config.getfloat('Processing', 'cube_edge_len')
@@ -965,16 +983,12 @@ def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_x
     """
 
     #print("worker {} started".format(iworker)); t = time.time()
-    if source_format == 'hdf5':
-        this_layer, _ = big_img_load(source_file)
-    else:
+    if source_format != 'hdf5':
         # xxx - implement a cacheing mechanism here, copy to /dev/shm
         this_layer = np.array(Image.open(source_file))
-
-    # allow cubing of one channel of color data
-    if this_layer.ndim > 2: this_layer = this_layer[:,:,source_channel]
-
-    if same_knossos_as_tif_stack_xy_orientation: this_layer = this_layer.T
+        # allow cubing of one channel of color data
+        if this_layer.ndim > 2: this_layer = this_layer[:,:,source_channel]
+        if same_knossos_as_tif_stack_xy_orientation: this_layer = this_layer.T
 
     # this is to avoid the 2GB limit for serializing into multiprocessing queues
     b = block_ranges
@@ -987,7 +1001,15 @@ def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_x
                 bdx = [max(b[0][x][0],xpass_range[0]), min(b[0][x][1],xpass_range[1])]
                 bcx = [(xpass_range[0] - b[0][x][0]) if b[0][x][0] < xpass_range[0] else 0,
                     (sx - b[0][x][1] + xpass_range[1]) if b[0][x][1] > xpass_range[1] else sx]
-                chunk = this_layer[bcx[0]:bcx[1],b[1][y][0]:b[1][y][1]]
+                if source_format == 'hdf5':
+                    if same_knossos_as_tif_stack_xy_orientation:
+                        rng = [[b[1][y][0],b[1][y][1]], [bcx[0],bcx[1]]]
+                    else:
+                        rng = [[bcx[0],bcx[1]], [b[1][y][0],b[1][y][1]]]
+                    chunk = big_img_load(source_file, rng=rng)
+                    if same_knossos_as_tif_stack_xy_orientation: chunk = chunk.T
+                else:
+                    chunk = this_layer[bcx[0]:bcx[1],b[1][y][0]:b[1][y][1]]
             else:
                 chunk = bdx = None
 
