@@ -905,7 +905,8 @@ def init_from_source_dir(config, log_fn):
     if test_data.ndim > 2: test_data = test_data[:,:,source_channel]
 
     # knossos uses swapped xy axes relative to images
-    test_data = np.swapaxes(test_data, 0, 1)
+    if config.getboolean('Dataset', 'same_knossos_as_tif_stack_xy_orientation'):
+        test_data = np.swapaxes(test_data, 0, 1)
 
     source_dims = test_data.shape
     config.set('Dataset', 'source_dims', str(test_data.shape))
@@ -977,8 +978,10 @@ def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_x
 
     # this is to avoid the 4GB limit for serializing into multiprocessing queues
     b = block_ranges
+    print(block_ranges)
     for x in range(len(b[0])):
         for y in range(len(b[1])):
+            print(x,y,b[x],b[y])
             d = {'chunk':this_layer[b[x][0]:b[x][1],b[y][0]:b[y][1]], 'iworker':iworker, 'x':x,'y':y}
             read_queue.put(d)
     print("worker {} finished in {}".format(iworker, time.time()-t))
@@ -1018,8 +1021,7 @@ def make_mag1_cubes_from_z_stack(config,
     source_channel = config.get('Dataset', 'source_channel')
 
     same_knossos_as_tif_stack_xy_orientation = \
-        config.getboolean('Dataset',
-                          'same_knossos_as_tif_stack_xy_orientation')
+        config.getboolean('Dataset', 'same_knossos_as_tif_stack_xy_orientation')
 
     # this is for the multiprocessing reads, items over 4GB can not be serialized.
     max_size = 3.875*2**30 # leave some space for a few other elements in serialized object
@@ -1168,8 +1170,8 @@ def make_mag1_cubes_from_z_stack(config,
                         nskipped_cubes += 1
                         continue
 
-                    # still needed this, at least with same_knossos_as_tif_stack_xy_orientation==True
-                    cube_data = np.swapaxes(cube_data, 1, 2)
+                    if same_knossos_as_tif_stack_xy_orientation:
+                        cube_data = np.swapaxes(cube_data, 1, 2)
 
                     prefix = os.path.normpath(os.path.abspath(
                         target_path + ('/mag%d' % (first_mag,)) + ('/x%04d/y%04d/z%04d/'
