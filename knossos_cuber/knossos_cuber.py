@@ -895,14 +895,14 @@ def init_from_source_dir(config, log_fn):
 
     # open the first image and extract the relevant information - all images are
     # assumed to have equal dimensions!
-    #test_img = Image.open(all_source_files[0])
-    #test_data = np.array(test_img)
+    log_fn("Loading first image to get dimensions"); t = time.time()
     if source_format == 'hdf5':
         test_data, _ = big_img_load(all_source_files[0])
     else:
         test_data = np.array(Image.open(all_source_files[0]))
     # allow cubing of one channel of color data
     if test_data.ndim > 2: test_data = test_data[:,:,source_channel]
+    log_fn("\t done in {:.2f} s".format(time.time()-t,))
 
     # knossos uses swapped xy axes relative to images
     if config.getboolean('Dataset', 'same_knossos_as_tif_stack_xy_orientation'):
@@ -964,7 +964,7 @@ def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_x
     """TODO
     """
 
-    print("worker {} started".format(iworker)); t = time.time()
+    #print("worker {} started".format(iworker)); t = time.time()
     if source_format == 'hdf5':
         this_layer, _ = big_img_load(source_file)
     else:
@@ -993,7 +993,7 @@ def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_x
 
             d = {'chunk':chunk, 'iworker':iworker, 'bdx':bdx, 'y':y}
             read_queue.put(d)
-    print("worker {} finished in {}".format(iworker, time.time()-t))
+    #print("worker {} finished in {}".format(iworker, time.time()-t))
 
     return
 
@@ -1121,7 +1121,7 @@ def make_mag1_cubes_from_z_stack(config,
                 # NOTE: only call join after queue is emptied
 
                 dt = time.time()
-                print_every = io_workers*ntblks
+                print_every = io_workers*ntblks # to disable prints here
                 worker_cnts = np.zeros((io_workers,), dtype=np.int64)
                 b = block_ranges
                 for i in range(io_workers*ntblks):
@@ -1133,14 +1133,14 @@ def make_mag1_cubes_from_z_stack(config,
                     cur_local_z = local_z + d['iworker']
                     # the chunk only gets passed back from the reading process if we need it for this x pass.
                     if d['chunk'] is not None:
-                        this_layer_out_block[cur_local_z, d['bdx'][0]:d['dbx'][1],
+                        this_layer_out_block[cur_local_z, d['bdx'][0]:d['bdx'][1],
                             b[1][d['y']][0]:b[1][d['y']][1]] = d['chunk']
                     worker_cnts[d['iworker']] += 1
                     del d
                 assert(read_queue.empty())
                 [x.join() for x in read_workers]
 
-                log_fn("\tParallel reading took {0}".format(time.time() - read_time))
+                log_fn("\tParallel reading took {:.2f} s".format(time.time() - read_time))
             log_fn("Reading took {0:.2f} s".format(time.time() - ref_time))
 
 
