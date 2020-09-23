@@ -20,7 +20,6 @@ import io
 import math
 import scipy.ndimage
 import numpy as np
-import threading, queue
 import multiprocessing as mp
 from PIL import Image
 import os
@@ -960,7 +959,7 @@ def init_from_source_dir(config, log_fn):
 
 
 def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_xy_orientation,
-        source_channel, read_queue):
+        source_channel, block_ranges, read_queue):
     """TODO
     """
 
@@ -976,8 +975,12 @@ def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_x
 
     if same_knossos_as_tif_stack_xy_orientation: this_layer = this_layer.T
 
-    d = {'this_layer':this_layer, 'iworker':iworker}
-    read_queue.put(d)
+    # this is to avoid the 4GB limit for serializing into multiprocessing queues
+    b = block_ranges
+    for x in range(len(b[0])):
+        for y in range(len(b[1])):
+            d = {'chunk':this_layer[b[x][0]:b[x][1],b[y][0]:b[y][1]], 'iworker':iworker, 'x':x,'y':y}
+            read_queue.put(d)
     print("worker {} finished in {}".format(iworker, time.time()-t))
 
     return
@@ -1005,16 +1008,36 @@ def make_mag1_cubes_from_z_stack(config,
 
     if source_dtype == 'uint16':
         source_dtype = np.uint16
+        source_bytes = 2
     else:
         source_dtype = np.uint8
+        source_bytes = 1
 
-    source_dims = literal_eval(config.get('Dataset', 'source_dims'))
+    source_shape = literal_eval(config.get('Dataset', 'source_dims'))
     source_format = config.get('Dataset', 'source_format')
     source_channel = config.get('Dataset', 'source_channel')
 
     same_knossos_as_tif_stack_xy_orientation = \
         config.getboolean('Dataset',
                           'same_knossos_as_tif_stack_xy_orientation')
+
+    # this is for the multiprocessing reads, items over 4GB can not be serialized.
+    max_size = 3.875*2**30 # leave some space for a few other elements in serialized object
+    size = source_shape[0]*source_shape[1]*source_bytes
+    if size < max_size:
+        nblks = [1,1]
+    else:
+        # create number of blocks in each dimension that is proportional to their sizes
+        ntblks = np.ceil(size / max_size)
+        if source_shape[0] > source_shape[1]:
+          nblks = int(np.ceil(np.sqrt(ntblks*source_shape[1]/source_shape[0])))
+          nblks = [int(np.ceil(ntblks/nblks)), nblks]
+        else:
+          nblks = int(np.ceil(np.sqrt(ntblks*source_shape[0]/source_shape[1])))
+          nblks = [nblks, int(np.ceil(ntblks/nblks))]
+    block_ranges = [[[x[0],x[-1]+1] for x in np.array_split(np.arange(y), z)] \
+        for y,z in zip(source_shape, nblks)]
+    ntblks = nblks[0]*nblks[1]
 
     num_read_workers = config.getint('Processing', 'num_read_workers')
     num_write_workers = config.getint('Processing', 'num_write_workers')
@@ -1028,14 +1051,13 @@ def make_mag1_cubes_from_z_stack(config,
 
     # we iterate over the z cubes and handle cube layer after cube layer
     write_queue = mp.Queue(num_write_workers)
-    #read_queue = mp.Queue(num_read_workers)
-    read_queue = queue.Queue(num_read_workers)
+    read_queue = mp.Queue(num_read_workers)
     for cur_z in range(0, num_z_cubes):
         for cur_pass in range(0, num_passes_per_cube_layer):
             this_pass_x_start = cur_pass * num_x_cubes_per_pass * cube_edge_len
             this_pass_x_end = (cur_pass+1) * num_x_cubes_per_pass * cube_edge_len
-            if this_pass_x_end > source_dims[0]:
-                this_pass_x_end = source_dims[0]
+            if this_pass_x_end > source_shape[0]:
+                this_pass_x_end = source_shape[0]
 
             if skip_already_cubed_layers:
                 # check the middle of x,y for an existing cube,
@@ -1063,13 +1085,6 @@ def make_mag1_cubes_from_z_stack(config,
                  num_y_cubes * cube_edge_len],
                 dtype=source_dtype)
 
-            # tell the kernel that we will need the next layer; not sure how much
-            # we gain here, this needs to be evaluated
-            #if FADVISE_AVAILABLE:
-            #    print("Running fadvise for this layer...")
-            #    for z in range(cur_z*cube_edge_len, (cur_z+1)*cube_edge_len):
-            #        fadvise.willneed(all_source_files[z])
-
             log_fn("Loading source files for pass {0}/{1}".format(cur_pass, num_passes_per_cube_layer))
             ref_time = time.time()
 
@@ -1085,47 +1100,51 @@ def make_mag1_cubes_from_z_stack(config,
                 log_fn("\tReading {} slices in parallel workers".format(io_workers))
                 read_time = time.time()
 
+                # threading does not work with hdf5, a global lock gets applied even for different hdf5 files.
+                # https://github.com/h5py/h5py/issues/591
                 read_workers = [None]*io_workers
                 for i in range(io_workers):
-                    #read_workers[i] = mp.Process(target=read_zslice, args=(i, source_format,
-                    #        all_source_files[z+i], same_knossos_as_tif_stack_xy_orientation, source_channel,
-                    #        read_queue))
-                    read_workers[i] = threading.threading(target=read_zslice, args=(i, source_format,
+                    read_workers[i] = mp.Process(target=read_zslice, args=(i, source_format,
                            all_source_files[z+i], same_knossos_as_tif_stack_xy_orientation, source_channel,
-                           read_queue))
+                           block_ranges, read_queue))
                     read_workers[i].start()
                 # NOTE: only call join after queue is emptied
 
                 dt = time.time()
-                print_every = io_workers
+                print_every = io_workers*ntblks
                 worker_cnts = np.zeros((io_workers,), dtype=np.int64)
-                for i in range(io_workers):
+                b = block_ranges
+                for i in range(io_workers*ntblks):
                     if i>0 and i%print_every==0:
-                        print('%d through q in %.3f s, worker_cnts:' % (print_every, time.time()-dt,)); dt = time.time()
-                        print(worker_cnts)
+                        print('%d through q in %.3f s, worker_cnts:' % (print_every, time.time()-dt,))
+                        print(worker_cnts); dt = time.time()
                     d = read_queue.get()
 
                     cur_local_z = local_z + d['iworker']
-                    this_layer = d['this_layer']
-                    s = this_layer[this_pass_x_start:this_pass_x_end,:].shape
                     # copy the data for this pass into the output buffer
+                    s = d['chunk'].shape
                     if num_passes_per_cube_layer > 1:
-                        this_layer_out_block[cur_local_z,:s[0],:s[1]] = \
-                            this_layer[this_pass_x_start:this_pass_x_end,:]
+                        if b[d['x']][0] < this_pass_x_end and b[d['x']][1] > this_pass_x_start:
+                            bdx = [max(b[d['x']][0],this_pass_x_start),min(b[d['x']][1],this_pass_x_end)]
+                            bcx = [(this_pass_x_start - b[d['x']][0]) if b[d['x']][0] < this_pass_x_start else 0,
+                                (b[d['x']][1] - this_pass_x_end) if b[d['x']][1] > this_pass_x_end else s[0]]
+                            this_layer_out_block[cur_local_z,bdx[0]:bdx[1],b[d['y']][0]:b[d['y']][1]] = \
+                                d['chunk'][bcx[0]:bcx[1],:]
                     else:
-                        this_layer_out_block[cur_local_z,:s[0],:s[1]] = this_layer
+                        this_layer_out_block[cur_local_z,b[d['x']][0]:b[d['x']][1],b[d['y']][0]:b[d['y']][1]] = \
+                            d['chunk']
                     worker_cnts[d['iworker']] += 1
-                    del this_layer, d
+                    del d
                 assert(read_queue.empty())
                 [x.join() for x in read_workers]
 
                 log_fn("\tParallel reading took {0}".format(time.time() - read_time))
             log_fn("Reading took {0:.2f} s".format(time.time() - ref_time))
 
-            twrite = time.time()
-            write_workers = []
 
             # write out the cubes for this z-cube layer and buffer
+            twrite = time.time()
+            write_workers = []
             nskipped_cubes = 0
             for cur_x in range(0, num_x_cubes_per_pass):
                 x_start = cur_x*cube_edge_len
