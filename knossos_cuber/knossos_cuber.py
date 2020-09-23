@@ -976,13 +976,11 @@ def read_zslice(iworker, source_format, source_file, same_knossos_as_tif_stack_x
 
     if same_knossos_as_tif_stack_xy_orientation: this_layer = this_layer.T
 
-    # this is to avoid the 4GB limit for serializing into multiprocessing queues
+    # this is to avoid the 2GB limit for serializing into multiprocessing queues
     b = block_ranges
-    print(block_ranges)
     for x in range(len(b[0])):
         for y in range(len(b[1])):
-            print(x,y,b[x],b[y])
-            d = {'chunk':this_layer[b[x][0]:b[x][1],b[y][0]:b[y][1]], 'iworker':iworker, 'x':x,'y':y}
+            d = {'chunk':this_layer[b[0][x][0]:b[0][x][1],b[1][y][0]:b[1][y][1]], 'iworker':iworker, 'x':x, 'y':y}
             read_queue.put(d)
     print("worker {} finished in {}".format(iworker, time.time()-t))
 
@@ -1023,8 +1021,8 @@ def make_mag1_cubes_from_z_stack(config,
     same_knossos_as_tif_stack_xy_orientation = \
         config.getboolean('Dataset', 'same_knossos_as_tif_stack_xy_orientation')
 
-    # this is for the multiprocessing reads, items over 4GB can not be serialized.
-    max_size = 3.875*2**30 # leave some space for a few other elements in serialized object
+    # this is for the multiprocessing reads, items over 2GB can not be serialized.
+    max_size = 2**31-1
     size = source_shape[0]*source_shape[1]*source_bytes
     if size < max_size:
         nblks = [1,1]
@@ -1126,15 +1124,15 @@ def make_mag1_cubes_from_z_stack(config,
                     # copy the data for this pass into the output buffer
                     s = d['chunk'].shape
                     if num_passes_per_cube_layer > 1:
-                        if b[d['x']][0] < this_pass_x_end and b[d['x']][1] > this_pass_x_start:
-                            bdx = [max(b[d['x']][0],this_pass_x_start),min(b[d['x']][1],this_pass_x_end)]
-                            bcx = [(this_pass_x_start - b[d['x']][0]) if b[d['x']][0] < this_pass_x_start else 0,
-                                (b[d['x']][1] - this_pass_x_end) if b[d['x']][1] > this_pass_x_end else s[0]]
-                            this_layer_out_block[cur_local_z,bdx[0]:bdx[1],b[d['y']][0]:b[d['y']][1]] = \
+                        if b[0][d['x']][0] < this_pass_x_end and b[0][d['x']][1] > this_pass_x_start:
+                            bdx = [max(b[0][d['x']][0],this_pass_x_start),min(b[0][d['x']][1],this_pass_x_end)]
+                            bcx = [(this_pass_x_start-b[0][d['x']][0]) if b[0][d['x']][0] < this_pass_x_start else 0,
+                                (s[0]-b[0][d['x']][1]+this_pass_x_end) if b[0][d['x']][1] > this_pass_x_end else s[0]]
+                            this_layer_out_block[cur_local_z,bdx[0]:bdx[1],b[1][d['y']][0]:b[1][d['y']][1]] = \
                                 d['chunk'][bcx[0]:bcx[1],:]
                     else:
-                        this_layer_out_block[cur_local_z,b[d['x']][0]:b[d['x']][1],b[d['y']][0]:b[d['y']][1]] = \
-                            d['chunk']
+                        this_layer_out_block[cur_local_z,b[0][d['x']][0]:b[0][d['x']][1],
+                            b[1][d['y']][0]:b[1][d['y']][1]] = d['chunk']
                     worker_cnts[d['iworker']] += 1
                     del d
                 assert(read_queue.empty())
