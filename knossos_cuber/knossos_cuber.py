@@ -331,7 +331,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     magpath = dataset_base_path + '/mag' + str(trg_mag) + '/';
     if not os.path.exists(magpath):
         os.makedirs(magpath)
-    open(magpath + '/knossos.conf', 'w')
+    fh=open(magpath + '/knossos.conf', 'w'); fh.close()
 
     # compile the 8 cubes that belong together, no overlap, set to 'bogus' at
     # the incomplete borders
@@ -486,6 +486,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                 d = write_queue.get()
                 nskipped_cubes[d['icube']] += d['nskipped']
                 write_workers[d['iworker']].join()
+                write_workers[d['iworker']].close()
                 cnt_write_workers -= 1
 
             cur_worker = mp.Process(target=write_compressed_cube, args=(config, first_cube,
@@ -509,6 +510,7 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
             d = write_queue.get()
             nskipped_cubes[d['icube']] += d['nskipped']
             write_workers[d['iworker']].join()
+            write_workers[d['iworker']].close()
         write_workers = []
 
         cube_write_time = time.time() - cube_write_time
@@ -574,9 +576,9 @@ def downsample_cube(job_info):
             fd.close()
             # this_cube = np.fromfile(path_to_src_cube, dtype=job_info.source_dtype)
         else:
-            # this_cube = np.array(Image.open(io.BytesIO(content)))
             try:
-                this_cube = np.array(Image.open(path_to_src_cube))
+                with Image.open(path_to_src_cube) as load_image:
+                    this_cube = np.array(load_image)
             except:
                 skipped_count += 1
                 continue
@@ -769,7 +771,8 @@ def compress_cube(job_info, cube_raw = None):
             cube_raw = np.frombuffer(content, dtype=np.uint8)
             #cube_raw = np.fromfile(job_info.src_cube_path, dtype=np.uint8)
         elif job_info.src_cube_path.endswith(".png"):
-            cube_raw = np.array(Image.open(job_info.src_cube_path))
+            with Image.open(job_info.src_cube_path) as load_image:
+                cube_raw = np.array(load_image)
     cube_raw = cube_raw.reshape(cube_edge_len * cube_edge_len, -1)
 
     if job_info.pre_gauss > 0.0:
@@ -936,7 +939,8 @@ def init_from_source_dir(config, log_fn):
             source_dims = source_dims[::-1]
     else:
         log_fn("Loading first image to get dimensions"); t = time.time()
-        test_data = np.array(Image.open(all_source_files[0]))
+        with Image.open(all_source_files[0]) as load_image:
+            test_data = np.array(load_image)
         # allow cubing of one channel of color data
         if test_data.ndim > 2: test_data = test_data[:,:,source_channel]
         # knossos uses swapped xy axes relative to images
@@ -1002,8 +1006,9 @@ def read_zslice(iworker, local_z, source_format, source_file, transpose,
     """
     #print("worker {} started".format(iworker)); t = time.time()
     if source_format != 'hdf5':
-        # xxx - implement a cacheing mechanism here, copy to /dev/shm
-        this_layer = np.array(Image.open(source_file))
+        # xxx - could implement a cacheing mechanism here, copy to /dev/shm
+        with Image.open(source_file) as load_image:
+            this_layer = np.array(load_image)
         # allow cubing of one channel of color data
         if this_layer.ndim > 2: this_layer = this_layer[:,:,source_channel]
         if transpose: this_layer = this_layer.T
@@ -1057,7 +1062,7 @@ def make_mag1_cubes_from_z_stack(config,
 
     cube_edge_len = config.getint('Processing', 'cube_edge_len')
     # use this instead of skip_already_cubed_layers in order to parallelize / restart.
-    z_cubes_mag1_rng = config.getint('Processing', 'z_cubes_mag1_rng')
+    z_cubes_mag1_rng = literal_eval(config.get('Processing', 'z_cubes_mag1_rng'))
     if z_cubes_mag1_rng[0] < 0: z_cubes_mag1_rng[0] = 0
     if z_cubes_mag1_rng[1] < 0: z_cubes_mag1_rng[1] = num_z_cubes
     assert(z_cubes_mag1_rng[0] < z_cubes_mag1_rng[1] and z_cubes_mag1_rng[1] <= num_z_cubes)
@@ -1119,13 +1124,14 @@ def make_mag1_cubes_from_z_stack(config,
     smm.start()  # Start the process that manages the shared memory blocks
     shm = smm.SharedMemory(size=block_size*source_bytes)
     this_layer_out_block = np.ndarray(block_shape, dtype=source_dtype, buffer=shm.buf)
-    # use ctypes rawarray for parallel reads, this is slower.
+    ## use ctypes rawarray for parallel reads, this is slower.
     #this_layer_out_block = np.frombuffer(mp.RawArray(source_ctype, block_size),
     #        dtype=source_dtype).reshape(block_shape)
 
     # we iterate over the z cubes and handle cube layer after cube layer
     num_x_cubes = num_x_cubes_per_pass*num_passes_per_cube_layer
     for cur_z in range(z_cubes_mag1_rng[0], z_cubes_mag1_rng[1]):
+        log_fn("Cubing for z cube layer {} / {}".format(cur_z, num_z_cubes))
         for cur_pass in range(0, num_passes_per_cube_layer):
             xpass_range = [cur_pass * num_x_cubes_per_pass * cube_edge_len,
                            (cur_pass+1) * num_x_cubes_per_pass * cube_edge_len]
@@ -1165,6 +1171,7 @@ def make_mag1_cubes_from_z_stack(config,
                     worker_cnts[d['iworker']] += 1
                 assert(read_queue.empty())
                 [x.join() for x in read_workers]
+                [x.close() for x in read_workers]
 
                 log_fn("\tParallel reading took {:.2f} s".format(time.time() - read_time))
             log_fn("Reading took {0:.2f} s".format(time.time() - ref_time))
@@ -1174,6 +1181,7 @@ def make_mag1_cubes_from_z_stack(config,
 
 
             # write out the cubes for this z-cube layer and buffer
+            log_fn("Writing cubes in {} parallel workers".format(num_write_workers))
             twrite = time.time()
             write_workers = []
             cnt_write_workers = 0
@@ -1210,6 +1218,7 @@ def make_mag1_cubes_from_z_stack(config,
                         d = write_queue.get()
                         nskipped_cubes += d['nskipped']
                         write_workers[d['iworker']].join()
+                        write_workers[d['iworker']].close()
                         cnt_write_workers -= 1
 
                     cur_worker = mp.Process(target=write_cube, args=(cube_data, prefix, cube_full_path,
@@ -1225,6 +1234,7 @@ def make_mag1_cubes_from_z_stack(config,
                 d = write_queue.get()
                 nskipped_cubes += d['nskipped']
                 write_workers[d['iworker']].join()
+                write_workers[d['iworker']].close()
             write_workers = []
 
             log_fn("Writing took {0:.2f} s".format(time.time()-twrite))
@@ -1288,7 +1298,8 @@ def knossos_cuber(config, log_fn):
 
         cube_edge_len = config.getint('Processing', 'cube_edge_len')
         write_knossos_conf(dataset_base_path + "/", scale, boundaries, exp_name, mag=1, cube_edge_len=cube_edge_len)
-        open(dataset_base_path + ("/mag%d/knossos.conf" % (first_mag,)), 'w') # only write dummy for mag detection
+        # only write dummy for mag detection
+        fh = open(dataset_base_path + ("/mag%d/knossos.conf" % (first_mag,)), 'w'); fh.close()
 
         total_mag1_time = time.time() - mag1_ref_time
 
@@ -1395,7 +1406,7 @@ def read_config_file(config_file):
     config = ConfigParser(allow_no_value=True)
 
     try:
-        config.read_file(open(config_file))
+        with open(config_file) as fh: config.read_file(fh)
     except IOError:
         print("Could not open config file `" + config_file + "'.")
         print("An IOError has appeared. Please check whether the "
@@ -1501,7 +1512,7 @@ def main():
     if ARGS.keep_z_until_mag is not None:
         CONFIG.set('Processing', 'keep_z_until_mag', ARGS.keep_z_until_mag)
     #print('keep_z_until_mag', CONFIG['Processing']['keep_z_until_mag'])
-    CONFIG.set('Processing', 'z_cubes_mag1_rng', ARGS.z_cubes_mag1_rng)
+    CONFIG.set('Processing', 'z_cubes_mag1_rng', str(ARGS.z_cubes_mag1_rng))
 
     if validate_config(CONFIG):
         knossos_cuber(CONFIG, lambda x: sys.stdout.write(str(x) + '\n'))
