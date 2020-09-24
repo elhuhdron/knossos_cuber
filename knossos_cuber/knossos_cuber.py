@@ -458,12 +458,21 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
 
         log_fn("Writing (and compressing)…")
         write_workers = []
+        cnt_write_workers = 0
         cube_write_time = time.time()
         nskipped_cubes = [0,0]
         # start writing the cubes
         for cube_data, job_info in zip(cubes, this_job_chunk):
+            # Changed this bogus thing here to the skip count in downsampling,
+            #   so that completely all zero downsamnpled blocks are also skipped.
+            #   cube_data is returned as None in those cases.
+            # for chunk in this_job_chunk:
+            #     if chunk.trg_cube_path != 'bogus':
+            #         prefix = os.path.dirname(chunk.trg_cube_path)
+            #         break
             if cube_data is None:
-                print("Skipped cube {0}".format(job_info.trg_cube_path))
+                #print("Skipped cube {0}".format(job_info.trg_cube_path))
+                nskipped_cubes[0] += 1; nskipped_cubes[1] += 1
                 continue
 
             if job_info.trg_cube_path2:
@@ -473,39 +482,34 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                 first_cube = cube_data
                 second_cube = None
 
-            if write_queue.qsize() > num_write_workers:
-                #print('Waiting on write q')
-                cur_worker = write_queue.get()
-                write_workers[cur_worker].join()
-                write_workers[cur_worker] = None
-                #print('Joined with {}'.format(cur_worker))
+            if cnt_write_workers > num_write_workers:
+                d = write_queue.get()
+                nskipped_cubes[d['icube']] += d['nskipped']
+                write_workers[d['iworker']].join()
+                cnt_write_workers -= 1
 
-            if np.sum(first_cube) != 0:
-                cur_worker = mp.Process(target=write_compressed_cube, args=(config, first_cube,
-                    os.path.dirname(job_info.trg_cube_path), job_info.trg_cube_path,
-                    False, write_queue, len(write_workers)))
-                cur_worker.start()
-                write_workers.append(cur_worker)
-            else:
-                nskipped_cubes[0] += 1
-            if job_info.trg_cube_path2 and np.sum(second_cube) != 0:
+            cur_worker = mp.Process(target=write_compressed_cube, args=(config, first_cube,
+                os.path.dirname(job_info.trg_cube_path), job_info.trg_cube_path,
+                False, write_queue, len(write_workers), 0))
+            cur_worker.start()
+            write_workers.append(cur_worker)
+            cnt_write_workers += 1
+
+            if job_info.trg_cube_path2:
                 cur_worker = mp.Process(target=write_compressed_cube, args=(config, second_cube,
                     os.path.dirname(job_info.trg_cube_path2), job_info.trg_cube_path2,
-                    False, write_queue, len(write_workers)))
+                    False, write_queue, len(write_workers), 1))
                 cur_worker.start()
                 write_workers.append(cur_worker)
-            elif job_info.trg_cube_path2:
-                nskipped_cubes[1] += 1
+                cnt_write_workers += 1
         # for cube_data, job_info in zip(cubes, this_job_chunk):
 
-        # wait until all writes are finished, empty the queue first
-        #print('write_workers len is {}'.format(len(write_workers)))
-        for i in range(len(write_workers)):
-            if write_workers[i] is not None:
-                cur_worker = write_queue.get()
-                write_workers[cur_worker].join()
-                write_workers[cur_worker] = None
-                #print('End joined with {}'.format(cur_worker))
+        # wait until all writes are finished
+        for i in range(cnt_write_workers):
+            d = write_queue.get()
+            nskipped_cubes[d['icube']] += d['nskipped']
+            write_workers[d['iworker']].join()
+        write_workers = []
 
         cube_write_time = time.time() - cube_write_time
         chunk_time = time.time() - chunk_time
@@ -725,6 +729,7 @@ def compress_dataset(config, log_fn):
     log_fn("Done compressing…".format(num_workers))
 
 
+# xxx - compression has not been recently tested in this version of the cuber.
 def compress_cube(job_info, cube_raw = None):
     """TODO
     """
@@ -815,7 +820,7 @@ def compress_cube_init(log_queue):
     compress_cube.log_queue = log_queue
 
 
-def write_compressed_cube(config, cube_data, prefix, cube_full_path, transpose, write_queue, worker_count):
+def write_compressed_cube(config, cube_data, prefix, cube_full_path, transpose, write_queue, iworker, icube):
     if not os.path.exists(prefix):
         os.makedirs(prefix)
 
@@ -827,31 +832,36 @@ def write_compressed_cube(config, cube_data, prefix, cube_full_path, transpose, 
     this_job_info.pre_gauss = config.getfloat('Compression', 'pre_comp_gauss_filter')
 
     if 'raw' in this_job_info.compressor:
-        write_cube(cube_data, prefix, cube_full_path, transpose,
-            write_queue, worker_count)
+        write_cube(cube_data, prefix, cube_full_path, transpose, write_queue, iworker, icube)
     if this_job_info.compressor != 'raw':
         compress_cube(this_job_info, cube_data)
-        write_queue.put(worker_count)
+        d = {'nskipped':0, 'iworker':iworker, 'icube':icube}
+        write_queue.put(d)
 
 
-def write_cube(cube_data, prefix, cube_full_path, transpose, write_queue, worker_count):
+def write_cube(cube_data, prefix, cube_full_path, transpose, write_queue, iworker, icube):
     """TODO
     """
 
-    if transpose: cube_data = cube_data.T
+    if np.sum(cube_data) > 0:
+        was_skipped = False
+        if transpose: cube_data = cube_data.T
 
-    #ref_time=time.time()
-    if not os.path.exists(prefix):
-        os.makedirs(prefix)
+        #ref_time=time.time()
+        if not os.path.exists(prefix):
+            os.makedirs(prefix)
 
-    try:
-        cube_data.tofile(os.path.splitext(cube_full_path)[0] + '.raw')
-        #print("writing took: {0}s".format(time.time()-ref_time))
-    except IOError:
-        # no log_fn due to multithreading
-        print("Could not write cube: {0}".format(cube_full_path))
+        try:
+            cube_data.tofile(os.path.splitext(cube_full_path)[0] + '.raw')
+            #print("writing took: {0}s".format(time.time()-ref_time))
+        except IOError:
+            # no log_fn due to multithreading
+            print("Could not write cube: {0}".format(cube_full_path))
+    else:
+        was_skipped = True
 
-    write_queue.put(worker_count)
+    d = {'nskipped':int(was_skipped), 'iworker':iworker, 'icube':icube}
+    write_queue.put(d)
 
 
 def _natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
@@ -1045,12 +1055,14 @@ def make_mag1_cubes_from_z_stack(config,
     target_path = config.get('Project', 'target_path') + "/" + exp_name
     config.set('Project', 'target_path', target_path)
 
-    skip_already_cubed_layers = config.getboolean('Processing',
-                                                  'skip_already_cubed_layers')
-
     cube_edge_len = config.getint('Processing', 'cube_edge_len')
-    source_dtype = config.get('Dataset', 'source_dtype')
+    # use this instead of skip_already_cubed_layers in order to parallelize / restart.
+    z_cubes_mag1_rng = config.getint('Processing', 'z_cubes_mag1_rng')
+    if z_cubes_mag1_rng[0] < 0: z_cubes_mag1_rng[0] = 0
+    if z_cubes_mag1_rng[1] < 0: z_cubes_mag1_rng[1] = num_z_cubes
+    assert(z_cubes_mag1_rng[0] < z_cubes_mag1_rng[1] and z_cubes_mag1_rng[1] <= num_z_cubes)
 
+    source_dtype = config.get('Dataset', 'source_dtype')
     if source_dtype == 'uint16':
         source_dtype = np.uint16
         source_bytes = 2
@@ -1059,7 +1071,6 @@ def make_mag1_cubes_from_z_stack(config,
         source_dtype = np.uint8
         source_bytes = 1
         #source_ctype = 'B'
-
     source_shape = literal_eval(config.get('Dataset', 'source_dims'))
     source_format = config.get('Dataset', 'source_format')
     source_channel = config.get('Dataset', 'source_channel')
@@ -1114,30 +1125,11 @@ def make_mag1_cubes_from_z_stack(config,
 
     # we iterate over the z cubes and handle cube layer after cube layer
     num_x_cubes = num_x_cubes_per_pass*num_passes_per_cube_layer
-    for cur_z in range(0, num_z_cubes):
+    for cur_z in range(z_cubes_mag1_rng[0], z_cubes_mag1_rng[1]):
         for cur_pass in range(0, num_passes_per_cube_layer):
             xpass_range = [cur_pass * num_x_cubes_per_pass * cube_edge_len,
                            (cur_pass+1) * num_x_cubes_per_pass * cube_edge_len]
             if xpass_range[1] > source_shape[0]: xpass_range[1] = source_shape[0]
-
-            if skip_already_cubed_layers:
-                # check the middle of x,y for an existing cube,
-                #   as cubes on the edges for many datasets are frequently empty.
-                check_x = cur_pass * num_x_cubes_per_pass + num_x_cubes_per_pass//2
-                check_y = num_y_cubes//2
-
-                # test whether this layer contains already "cubes"
-                prefix = os.path.normpath(os.path.abspath(
-                    target_path + ('/mag%d' % (first_mag,)) + ('/x%04d/y%04d/z%04d/' % (check_x, check_y, cur_z)) ))
-
-                cube_full_path = os.path.normpath(
-                    prefix + '/%s_mag%d_x%04d_y%04d_z%04d.raw'
-                    % (exp_name, first_mag, check_x, check_y, cur_z))
-
-                if os.path.exists(cube_full_path):
-                    log_fn("Skipping cube layer {0} pass {1}, cube found:".format(cur_z, cur_pass))
-                    print(cube_full_path)
-                    continue
 
             log_fn("Loading source files for pass {0}/{1}".format(cur_pass, num_passes_per_cube_layer))
             ref_time = time.time()
@@ -1184,6 +1176,7 @@ def make_mag1_cubes_from_z_stack(config,
             # write out the cubes for this z-cube layer and buffer
             twrite = time.time()
             write_workers = []
+            cnt_write_workers = 0
             nskipped_cubes = 0
             for cur_x in range(0, num_x_cubes_per_pass):
                 x_start = cur_x*cube_edge_len
@@ -1199,13 +1192,7 @@ def make_mag1_cubes_from_z_stack(config,
                     # slice cube_data out of buffer
                     y_start = cur_y*cube_edge_len
                     y_end = (cur_y+1)*cube_edge_len
-
-                    cube_data = this_layer_out_block[
-                        :, x_start:x_end, y_start:y_end]
-
-                    if np.sum(cube_data) == 0:
-                        nskipped_cubes += 1
-                        continue
+                    cube_data = this_layer_out_block[:, x_start:x_end, y_start:y_end]
 
                     prefix = os.path.normpath(os.path.abspath(
                         target_path + ('/mag%d' % (first_mag,)) + ('/x%04d/y%04d/z%04d/'
@@ -1219,30 +1206,26 @@ def make_mag1_cubes_from_z_stack(config,
                            glob_cur_y_cube,
                            glob_cur_z_cube))
 
-                    #log_fn("Writing cube {0}".format(cube_full_path))
-
-                    if write_queue.qsize() > num_write_workers:
-                        print('Waiting on write q')
-                        cur_worker = write_queue.get()
-                        write_workers[cur_worker].join()
-                        write_workers[cur_worker] = None
-                        print('Joined with {}'.format(cur_worker))
+                    if cnt_write_workers > num_write_workers:
+                        d = write_queue.get()
+                        nskipped_cubes += d['nskipped']
+                        write_workers[d['iworker']].join()
+                        cnt_write_workers -= 1
 
                     cur_worker = mp.Process(target=write_cube, args=(cube_data, prefix, cube_full_path,
-                            same_knossos_as_tif_stack_xy_orientation, write_queue, len(write_workers)))
+                            same_knossos_as_tif_stack_xy_orientation, write_queue, len(write_workers), 0))
                     cur_worker.start()
                     write_workers.append(cur_worker)
+                    cnt_write_workers += 1
                 #for cur_y in range(0, num_y_cubes):
             #for cur_x in range(0, num_x_cubes_per_pass):
 
-            # wait until all writes are finished, empty the queue first
-            print('write_workers len is {}'.format(len(write_workers)))
-            for i in range(len(write_workers)):
-                if write_workers[i] is not None:
-                    cur_worker = write_queue.get()
-                    write_workers[cur_worker].join()
-                    write_workers[cur_worker] = None
-                    print('End joined with {}'.format(cur_worker))
+            # wait until all writes are finished
+            for i in range(cnt_write_workers):
+                d = write_queue.get()
+                nskipped_cubes += d['nskipped']
+                write_workers[d['iworker']].join()
+            write_workers = []
 
             log_fn("Writing took {0:.2f} s".format(time.time()-twrite))
             log_fn("Skipped {0} empty cubes".format(nskipped_cubes))
@@ -1474,6 +1457,9 @@ def create_parser():
              "source format via the command line.",
         default='config.ini')
 
+    parser.add_argument('--z-cubes-mag1-rng', nargs=2, type=int, default=[-1,-1],
+        help='only cube this range of z-cubes in mag1 (default to all)')
+
     return parser
 
 
@@ -1514,7 +1500,8 @@ def main():
     CONFIG.set('Dataset', 'source_format', ARGS.format)
     if ARGS.keep_z_until_mag is not None:
         CONFIG.set('Processing', 'keep_z_until_mag', ARGS.keep_z_until_mag)
-    print('keep_z_until_mag', CONFIG['Processing']['keep_z_until_mag'])
+    #print('keep_z_until_mag', CONFIG['Processing']['keep_z_until_mag'])
+    CONFIG.set('Processing', 'z_cubes_mag1_rng', ARGS.z_cubes_mag1_rng)
 
     if validate_config(CONFIG):
         knossos_cuber(CONFIG, lambda x: sys.stdout.write(str(x) + '\n'))
