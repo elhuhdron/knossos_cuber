@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""A Python script that converts images into a **Knossos**-readable
-format."
+"""A Python script that converts images into a **Knossos**-readable format."
 
+   This script has been heavily modified from the original version.
 """
 
 from functools import reduce
@@ -148,7 +148,8 @@ def get_list_of_all_cubes_in_dataset(dataset_base_path, log_fn):
         log_fn("Cube listing took: {0} s".format(time.time()-ref_time))
 
     print(found_cube_files[0])
-    experimentname = re.compile(r"(?P<experimentname>.*)_mag.*\.(?P<extension>\w)").search(os.path.basename(found_cube_files[0])).group("experimentname")
+    experimentname = re.compile(r"(?P<experimentname>.*)_mag.*\.(?P<extension>\w)").\
+        search(os.path.basename(found_cube_files[0])).group("experimentname")
     log_fn("extracted experiment name: »{0}«".format(experimentname))
 
     from_raw = None
@@ -165,9 +166,12 @@ def get_list_of_all_cubes_in_dataset(dataset_base_path, log_fn):
     if use_zerodir:
         mag = int(re.compile(r'.*mag(?P<magID>\d+)').search(dataset_base_path).group('magID'))
 
-        x_count = len([name for name in os.listdir(dataset_base_path) if os.path.isdir(os.path.join(dataset_base_path, name))])
-        y_count = len([name for name in os.listdir(os.path.join(dataset_base_path, "x0000")) if os.path.isdir(os.path.join(dataset_base_path, "x0000", name))])
-        z_count = len([name for name in os.listdir(os.path.join(dataset_base_path, "x0000", "y0000")) if os.path.isdir(os.path.join(dataset_base_path, "x0000", "y0000", name))])
+        x_count = len([name for name in os.listdir(dataset_base_path) \
+            if os.path.isdir(os.path.join(dataset_base_path, name))])
+        y_count = len([name for name in os.listdir(os.path.join(dataset_base_path, "x0000")) \
+            if os.path.isdir(os.path.join(dataset_base_path, "x0000", name))])
+        z_count = len([name for name in os.listdir(os.path.join(dataset_base_path, "x0000", "y0000")) \
+            if os.path.isdir(os.path.join(dataset_base_path, "x0000", "y0000", name))])
 
         real_base = dataset_base_path.split("/mag")[0]
         print(real_base)
@@ -209,14 +213,15 @@ def write_knossos_conf(data_set_base_folder='',
 
 
 def get_cube_fname(basepath, expname, mag, x, y, z, extension):
-    return '{basepath}/mag{mag}/x{x:04d}/y{y:04d}/z{z:04d}/{expname}_mag{mag}_x{x:04d}_y{y:04d}_z{z:04d}{extension}'.format(
+    return '{basepath}/mag{mag}/x{x:04d}/y{y:04d}/z{z:04d}/{expname}_mag{mag}_x{x:04d}_y{y:04d}_z{z:04d}{ext}'\
+        .format(
                 **{'basepath': basepath,
                    'x': x,
                    'y': y,
                    'z': z,
                    'expname': expname,
                    'mag': mag,
-                   'extension': extension})
+                   'ext': extension})
 
 def find_mag_folders(dataset_base_path, log_fn):
     mag_matcher = re.compile(r'.*mag(?P<magID>\d+)')
@@ -334,7 +339,8 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     job_prep_time = time.time()
     log_fn("Preparing jobs…")
 
-    experimentname = re.compile(r"(?P<experimentname>.*)_mag.*\.(?P<extension>\w)").search(os.path.basename(all_cubes[0])).group("experimentname")
+    experimentname = re.compile(r"(?P<experimentname>.*)_mag.*\.(?P<extension>\w)").\
+        search(os.path.basename(all_cubes[0])).group("experimentname")
 
     downsampling_job_info = []
     skipped_count = 0
@@ -374,10 +380,13 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
         # out_path = out_path.replace('mag'+str(src_mag), 'mag'+str(trg_mag))
         extension = ".jpg"
         if zanisotrop: # TODO
-            this_job_info.trg_cube_path = get_cube_fname(dataset_base_path, experimentname, trg_mag, cur_x // 2, cur_y // 2, cur_z, extension)  #d int/int
-            this_job_info.trg_cube_path2 = get_cube_fname(dataset_base_path, experimentname, trg_mag, cur_x // 2, cur_y // 2, cur_z + 1, extension)  #d int/int
+            this_job_info.trg_cube_path = get_cube_fname(dataset_base_path, experimentname,
+                trg_mag, cur_x // 2, cur_y // 2, cur_z, extension)  #d int/int
+            this_job_info.trg_cube_path2 = get_cube_fname(dataset_base_path, experimentname,
+                trg_mag, cur_x // 2, cur_y // 2, cur_z + 1, extension)  #d int/int
         else:
-            this_job_info.trg_cube_path = get_cube_fname(dataset_base_path, experimentname, trg_mag, cur_x // 2, cur_y // 2, cur_z // 2, extension)  #d int/int
+            this_job_info.trg_cube_path = get_cube_fname(dataset_base_path, experimentname,
+                trg_mag, cur_x // 2, cur_y // 2, cur_z // 2, extension)  #d int/int
 
         if skip_already_cubed_downsample_layers and (\
                 os.path.exists(this_job_info.trg_cube_path) and
@@ -453,11 +462,6 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
         nskipped_cubes = [0,0]
         # start writing the cubes
         for cube_data, job_info in zip(cubes, this_job_chunk):
-            # for chunk in this_job_chunk:
-            #     if chunk.trg_cube_path != 'bogus':
-            #         prefix = os.path.dirname(chunk.trg_cube_path)
-            #         break
-
             if cube_data is None:
                 print("Skipped cube {0}".format(job_info.trg_cube_path))
                 continue
@@ -470,14 +474,16 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
                 second_cube = None
 
             if write_queue.qsize() > num_write_workers:
+                #print('Waiting on write q')
                 cur_worker = write_queue.get()
                 write_workers[cur_worker].join()
                 write_workers[cur_worker] = None
+                #print('Joined with {}'.format(cur_worker))
 
             if np.sum(first_cube) != 0:
                 cur_worker = mp.Process(target=write_compressed_cube, args=(config, first_cube,
                     os.path.dirname(job_info.trg_cube_path), job_info.trg_cube_path,
-                    write_queue, len(write_workers)))
+                    False, write_queue, len(write_workers)))
                 cur_worker.start()
                 write_workers.append(cur_worker)
             else:
@@ -485,18 +491,21 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
             if job_info.trg_cube_path2 and np.sum(second_cube) != 0:
                 cur_worker = mp.Process(target=write_compressed_cube, args=(config, second_cube,
                     os.path.dirname(job_info.trg_cube_path2), job_info.trg_cube_path2,
-                    write_queue, len(write_workers)))
+                    False, write_queue, len(write_workers)))
                 cur_worker.start()
                 write_workers.append(cur_worker)
             elif job_info.trg_cube_path2:
                 nskipped_cubes[1] += 1
+        # for cube_data, job_info in zip(cubes, this_job_chunk):
 
         # wait until all writes are finished, empty the queue first
+        #print('write_workers len is {}'.format(len(write_workers)))
         for i in range(len(write_workers)):
-            if i is not None:
+            if write_workers[i] is not None:
                 cur_worker = write_queue.get()
                 write_workers[cur_worker].join()
                 write_workers[cur_worker] = None
+                #print('End joined with {}'.format(cur_worker))
 
         cube_write_time = time.time() - cube_write_time
         chunk_time = time.time() - chunk_time
@@ -649,8 +658,10 @@ def downsample_cube(job_info):
 
     ## use block-reduce method
     #block_size = (1,2,2) if job_info.trg_cube_path2 else (2,2,2)
-    ##down_block = measure.block_reduce(down_block, block_size=block_size, func=np.median).astype(job_info.source_dtype)
-    #down_block = measure.block_reduce(down_block, block_size=block_size, func=np.mean).astype(job_info.source_dtype)
+    ##down_block = measure.block_reduce(down_block, block_size=block_size,
+    ##    func=np.median).astype(job_info.source_dtype)
+    #down_block = measure.block_reduce(down_block, block_size=block_size,
+    #    func=np.mean).astype(job_info.source_dtype)
 
     # extract directory of out_path
     #if not os.path.exists(os.path.dirname(job_info.trg_cube_path)):
@@ -791,7 +802,8 @@ def compress_cube(job_info, cube_raw = None):
 
     # print here, not log_fn, because log_fn may not be able to write to some
     # data structure from multiple processes.
-    #compress_cube.log_queue.put("Compress, writing of {0} took: {1} s".format(cube_path_without_ending, time.time() - ref_time))
+    #compress_cube.log_queue.put("Compress, writing of {0} took: {1} s"\
+    #    .format(cube_path_without_ending, time.time() - ref_time))
 
     return
 
@@ -803,15 +815,9 @@ def compress_cube_init(log_queue):
     compress_cube.log_queue = log_queue
 
 
-def write_compressed_cube(config, cube_data, prefix, cube_full_path, write_queue, worker_count):
-    # write_cube(cube_data, prefix, cube_full_path) # TODO
+def write_compressed_cube(config, cube_data, prefix, cube_full_path, transpose, write_queue, worker_count):
     if not os.path.exists(prefix):
         os.makedirs(prefix)
-
-    #newprefix = prefix
-    #newprefix = newprefix.replace(newprefix[:newprefix.index("mag")],"/run/media/npfeiler/2A4620300680E198/AOB2014NA/")
-    #if not os.path.exists(newprefix):
-    #    os.makedirs(newprefix)
 
     this_job_info = CompressionJobInfo()
 
@@ -821,15 +827,18 @@ def write_compressed_cube(config, cube_data, prefix, cube_full_path, write_queue
     this_job_info.pre_gauss = config.getfloat('Compression', 'pre_comp_gauss_filter')
 
     if 'raw' in this_job_info.compressor:
-        write_cube(cube_data, prefix, cube_full_path, write_queue, worker_count)
+        write_cube(cube_data, prefix, cube_full_path, transpose,
+            write_queue, worker_count)
     if this_job_info.compressor != 'raw':
         compress_cube(this_job_info, cube_data)
         write_queue.put(worker_count)
 
 
-def write_cube(cube_data, prefix, cube_full_path, write_queue, worker_count):
+def write_cube(cube_data, prefix, cube_full_path, transpose, write_queue, worker_count):
     """TODO
     """
+
+    if transpose: cube_data = cube_data.T
 
     #ref_time=time.time()
     if not os.path.exists(prefix):
@@ -843,7 +852,6 @@ def write_cube(cube_data, prefix, cube_full_path, write_queue, worker_count):
         print("Could not write cube: {0}".format(cube_full_path))
 
     write_queue.put(worker_count)
-    return
 
 
 def _natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
@@ -922,8 +930,7 @@ def init_from_source_dir(config, log_fn):
         # allow cubing of one channel of color data
         if test_data.ndim > 2: test_data = test_data[:,:,source_channel]
         # knossos uses swapped xy axes relative to images
-        if same_knossos_as_tif_stack_xy_orientation:
-            test_data = np.swapaxes(test_data, 0, 1)
+        if same_knossos_as_tif_stack_xy_orientation: test_data = test_data.T
         source_dims = test_data.shape
         source_dtype = test_data.dtype
         log_fn("\t done in {:.2f} s".format(time.time()-t,))
@@ -931,7 +938,8 @@ def init_from_source_dir(config, log_fn):
     config.set('Dataset', 'source_dims', str(source_dims))
     config.set('Dataset', 'source_dtype', str(source_dtype))
 
-    #q (important for division below!) Why getfloat, not getint? It is int in the config.ini and that would make more sense.
+    #q (important for division below!) Why getfloat, not getint?
+    #  It is int in the config.ini and that would make more sense.
     cube_edge_len = config.getfloat('Processing', 'cube_edge_len')
 
     # determine the number of passes required for each cube layer - if several
@@ -978,7 +986,7 @@ def init_from_source_dir(config, log_fn):
     return cube_info
 
 
-def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_tif_stack_xy_orientation,
+def read_zslice(iworker, local_z, source_format, source_file, transpose,
         source_channel, block_ranges, xpass_range, read_queue, this_layer_out_block):
     """TODO
     """
@@ -988,7 +996,7 @@ def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_ti
         this_layer = np.array(Image.open(source_file))
         # allow cubing of one channel of color data
         if this_layer.ndim > 2: this_layer = this_layer[:,:,source_channel]
-        if same_knossos_as_tif_stack_xy_orientation: this_layer = this_layer.T
+        if transpose: this_layer = this_layer.T
 
     # the blocking is a throwback for using queues (2GB item limit) instead of shared memory.
     b = block_ranges
@@ -1003,12 +1011,12 @@ def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_ti
                 bcx = [(xpass_range[0] - b[0][x][0]) if b[0][x][0] < xpass_range[0] else 0,
                     (sx - b[0][x][1] + xpass_range[1]) if b[0][x][1] > xpass_range[1] else sx]
                 if source_format == 'hdf5':
-                    if same_knossos_as_tif_stack_xy_orientation:
+                    if transpose:
                         rng = [[b[1][y][0],b[1][y][1]], [bcx[0],bcx[1]]]
                     else:
                         rng = [[bcx[0],bcx[1]], [b[1][y][0],b[1][y][1]]]
                     chunk = big_img_load(source_file, rng=rng)
-                    if same_knossos_as_tif_stack_xy_orientation: chunk = chunk.T
+                    if transpose: chunk = chunk.T
                 else:
                     chunk = this_layer[bcx[0]:bcx[1],b[1][y][0]:b[1][y][1]]
                 this_layer_out_block[iworker + local_z, bdx[0]:bdx[1], b[1][y][0]:b[1][y][1]] = chunk
@@ -1021,8 +1029,6 @@ def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_ti
         #for y in range(len(b[1])):
     #for x in range(len(b[0])):
     #print("worker {} finished in {}".format(iworker, time.time()-t))
-
-    return
 
 
 def make_mag1_cubes_from_z_stack(config,
@@ -1201,9 +1207,6 @@ def make_mag1_cubes_from_z_stack(config,
                         nskipped_cubes += 1
                         continue
 
-                    if same_knossos_as_tif_stack_xy_orientation:
-                        cube_data = np.swapaxes(cube_data, 1, 2)
-
                     prefix = os.path.normpath(os.path.abspath(
                         target_path + ('/mag%d' % (first_mag,)) + ('/x%04d/y%04d/z%04d/'
                         % (glob_cur_x_cube, glob_cur_y_cube, glob_cur_z_cube)) ))
@@ -1219,23 +1222,27 @@ def make_mag1_cubes_from_z_stack(config,
                     #log_fn("Writing cube {0}".format(cube_full_path))
 
                     if write_queue.qsize() > num_write_workers:
+                        print('Waiting on write q')
                         cur_worker = write_queue.get()
                         write_workers[cur_worker].join()
                         write_workers[cur_worker] = None
+                        print('Joined with {}'.format(cur_worker))
 
                     cur_worker = mp.Process(target=write_cube, args=(cube_data, prefix, cube_full_path,
-                            write_queue, len(write_workers)))
+                            same_knossos_as_tif_stack_xy_orientation, write_queue, len(write_workers)))
                     cur_worker.start()
                     write_workers.append(cur_worker)
                 #for cur_y in range(0, num_y_cubes):
             #for cur_x in range(0, num_x_cubes_per_pass):
 
             # wait until all writes are finished, empty the queue first
+            print('write_workers len is {}'.format(len(write_workers)))
             for i in range(len(write_workers)):
-                if i is not None:
+                if write_workers[i] is not None:
                     cur_worker = write_queue.get()
                     write_workers[cur_worker].join()
                     write_workers[cur_worker] = None
+                    print('End joined with {}'.format(cur_worker))
 
             log_fn("Writing took {0:.2f} s".format(time.time()-twrite))
             log_fn("Skipped {0} empty cubes".format(nskipped_cubes))
@@ -1312,7 +1319,8 @@ def knossos_cuber(config, log_fn):
 
     if config.getboolean('Processing', 'perform_downsampling'):
         total_down_ref_time = time.time()
-        curr_mag = config.getint('Processing', 'first_downsampling_mag', fallback=2)  # q mags are always ints, right? (important for division below!)
+        # q mags are always ints, right? (important for division below!)
+        curr_mag = config.getint('Processing', 'first_downsampling_mag', fallback=2)
 
         # `mags_to_gen' is specified like `2**20' in the configuration file.
         # To parse this number, the string has to be split at `**',
