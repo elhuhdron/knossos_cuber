@@ -20,8 +20,8 @@ import io
 import math
 import scipy.ndimage
 import numpy as np
-import multiprocessing as mp, RawArray
-#from multiprocessing import managers
+import multiprocessing as mp
+from multiprocessing import managers
 from PIL import Image
 import os
 import itertools
@@ -999,6 +999,7 @@ def read_zslice(iworker, local_z, source_format, source_file, same_knossos_as_ti
             #   in the case that we have to do multiple passes per layer.
             if b[0][x][0] < xpass_range[1] and b[0][x][1] > xpass_range[0]:
                 bdx = [max(b[0][x][0],xpass_range[0]), min(b[0][x][1],xpass_range[1])]
+                bdx = [x - xpass_range[0] for x in bdx]
                 bcx = [(xpass_range[0] - b[0][x][0]) if b[0][x][0] < xpass_range[0] else 0,
                     (sx - b[0][x][1] + xpass_range[1]) if b[0][x][1] > xpass_range[1] else sx]
                 if source_format == 'hdf5':
@@ -1047,11 +1048,11 @@ def make_mag1_cubes_from_z_stack(config,
     if source_dtype == 'uint16':
         source_dtype = np.uint16
         source_bytes = 2
-        source_ctype = 'H'
+        #source_ctype = 'H'
     else:
         source_dtype = np.uint8
         source_bytes = 1
-        source_ctype = 'B'
+        #source_ctype = 'B'
 
     source_shape = literal_eval(config.get('Dataset', 'source_dims'))
     source_format = config.get('Dataset', 'source_format')
@@ -1092,16 +1093,18 @@ def make_mag1_cubes_from_z_stack(config,
     write_queue = mp.Queue(num_write_workers)
     read_queue = mp.Queue(num_read_workers)
     # use shared memory for parallel reads
+    # NOTE: by default this uses /dev/shm, which by default is only half as big as system memory... meh
     block_shape = [cube_edge_len,
                    num_x_cubes_per_pass * cube_edge_len,
                    num_y_cubes * cube_edge_len]
     block_size = cube_edge_len**3 * num_x_cubes_per_pass * num_y_cubes
-    # smm = managers.SharedMemoryManager()
-    # smm.start()  # Start the process that manages the shared memory blocks
-    # shm = smm.SharedMemory(size=block_size*source_bytes)
-    # this_layer_out_block = np.ndarray(block_shape,
-    #     dtype=source_dtype, buffer=shm.buf)
-    this_layer_out_block = np.frombuffer(RawArray(source_ctype, block_size)).reshape(block_shape)
+    smm = managers.SharedMemoryManager()
+    smm.start()  # Start the process that manages the shared memory blocks
+    shm = smm.SharedMemory(size=block_size*source_bytes)
+    this_layer_out_block = np.ndarray(block_shape, dtype=source_dtype, buffer=shm.buf)
+    # use ctypes rawarray for parallel reads, this is slower.
+    #this_layer_out_block = np.frombuffer(mp.RawArray(source_ctype, block_size),
+    #        dtype=source_dtype).reshape(block_shape)
 
     # we iterate over the z cubes and handle cube layer after cube layer
     num_x_cubes = num_x_cubes_per_pass*num_passes_per_cube_layer
@@ -1239,7 +1242,7 @@ def make_mag1_cubes_from_z_stack(config,
 
         #for cur_pass in range(0, num_passes_per_cube_layer):
     #for cur_z in range(0, num_z_cubes):
-    #smm.shutdown()  # Calls unlink() on sl, raw_shm, and another_sl
+    smm.shutdown()  # Calls unlink() on sl, raw_shm, and another_sl
 
 
 def knossos_cuber(config, log_fn):
