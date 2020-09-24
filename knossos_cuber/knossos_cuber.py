@@ -41,9 +41,8 @@ try:
 except ImportError:
     from configparser import ConfigParser
 import argparse
-from shutil import copyfile
-
-from pathlib import Path
+import shutil
+import glob
 
 import h5py
 
@@ -1079,7 +1078,9 @@ def make_mag1_cubes_from_z_stack(config,
     source_shape = literal_eval(config.get('Dataset', 'source_dims'))
     source_format = config.get('Dataset', 'source_format')
     source_channel = config.get('Dataset', 'source_channel')
+
     num_z = len(all_source_files)
+    rmd_z = num_z % cube_edge_len
 
     same_knossos_as_tif_stack_xy_orientation = \
         config.getboolean('Dataset', 'same_knossos_as_tif_stack_xy_orientation')
@@ -1143,7 +1144,9 @@ def make_mag1_cubes_from_z_stack(config,
                 z = cur_z*cube_edge_len + local_z
                 if z >= num_z: break
 
-                if local_z + num_read_workers > cube_edge_len:
+                if cur_z == num_z_cubes-1 and rmd_z > 0 and local_z + num_read_workers > rmd_z:
+                    io_workers = rmd_z - local_z
+                elif local_z + num_read_workers > cube_edge_len:
                     io_workers = cube_edge_len - local_z
                 else:
                     io_workers = num_read_workers
@@ -1176,8 +1179,8 @@ def make_mag1_cubes_from_z_stack(config,
                 log_fn("\tParallel reading took {:.2f} s".format(time.time() - read_time))
             log_fn("Reading took {0:.2f} s".format(time.time() - ref_time))
             # zero-fill remainder slices in last cube
-            if cur_z == num_z_cubes-1 and num_z_cubes*cube_edge_len > num_z:
-                this_layer_out_block[num_z-(num_z_cubes-1)*cube_edge_len:,:,:] = 0
+            if cur_z == num_z_cubes-1 and rmd_z > 0:
+                this_layer_out_block[rmd_z:,:,:] = 0
 
 
             # write out the cubes for this z-cube layer and buffer
@@ -1501,9 +1504,10 @@ def main():
         sys.exit()
 
     if ARGS.config is not None:
-        config_file = Path("config.ini")
-        if not config_file.is_file():
-            copyfile(os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini"), config_file)
+        config_file = "config.ini"
+        if not os.path.isfile(config_file):
+            shutil.copyfile(os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                "config.ini"), config_file)
     CONFIG = read_config_file(ARGS.config)
 
     CONFIG.set('Project', 'source_path', ARGS.source_dir)
@@ -1519,4 +1523,12 @@ def main():
 
 
 if __name__ == '__main__':
+    # try to clear out shared memory files from crashed jobs before starting
+    for fn in glob.glob('/dev/shm/*'):
+        if os.path.isfile(fn):
+            try: os.remove(fn)
+            except: pass
+        else:
+            shutil.rmtree(fn, ignore_errors=True)
+
     main()
