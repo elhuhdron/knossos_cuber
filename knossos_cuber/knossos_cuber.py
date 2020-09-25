@@ -80,7 +80,6 @@ class DownsampleJobInfo(object):
         self.trg_cube_path = ''
         self.trg_cube_path2 = ''
         self.cube_edge_len = 128
-        self.skip_already_cubed_layers = False
 
 
 class CompressionJobInfo(object):
@@ -100,6 +99,7 @@ def big_img_info(fn, dataset='image'):
     fh.close()
     return img_shape, img_dtype
 
+
 def big_img_load(fn, dataset='image', rng=None):
     fh = h5py.File(fn, 'r')
     image = fh[dataset]
@@ -110,7 +110,18 @@ def big_img_load(fn, dataset='image', rng=None):
     fh.close()
     return img_blk
 
-def get_list_of_all_cubes_in_dataset(dataset_base_path, log_fn):
+
+def make_cube_full_path(target_path, exp_name, mag, ext, x, y, z):
+    prefix = os.path.normpath(os.path.abspath(
+        target_path + ('/mag%d' % (mag,)) + ('/x%04d/y%04d/z%04d/' % (x,y,z)) ))
+
+    cube_full_path = os.path.normpath(
+        prefix + '/%s_mag%d_x%04d_y%04d_z%04d.%s'
+        % (exp_name, mag, x, y, z, ext))
+    return prefix, cube_full_path
+
+
+def get_list_of_all_cubes_in_dataset(dataset_base_path, log_fn, ext_only=False):
     """TODO
 
     Args:
@@ -132,15 +143,16 @@ def get_list_of_all_cubes_in_dataset(dataset_base_path, log_fn):
         found_cube_files = []
         ref_time = time.time()
         for root, _, files in os.walk(dataset_base_path):
-            cur_file = None
+            cur_file = None; ext = None
             for file in [f for f in files if os.path.basename(f).endswith(".jpg")]:
-                cur_file = file
+                cur_file = file; ext = 'jpg'
             for file in [f for f in files if os.path.basename(f).endswith(".raw")]:
-                cur_file = file
+                cur_file = file; ext = 'raw'
             for file in [f for f in files if os.path.basename(f).endswith(".png")]:
-                cur_file = file
+                cur_file = file; ext = 'png'
             if cur_file is not None:
                 all_cubes.append(os.path.join(root, cur_file))
+                if ext_only: break
             # if len(all_cubes) > 100:
             #     break
         found_cube_files.append(all_cubes[0])
@@ -183,7 +195,7 @@ def get_list_of_all_cubes_in_dataset(dataset_base_path, log_fn):
     else:
         print("{0} cubes".format(len(all_cubes)))
 
-    return from_raw, all_cubes
+    return from_raw, all_cubes, ext
 
 
 def write_knossos_conf(data_set_base_folder='',
@@ -222,6 +234,7 @@ def get_cube_fname(basepath, expname, mag, x, y, z, extension):
                    'mag': mag,
                    'ext': extension})
 
+
 def find_mag_folders(dataset_base_path, log_fn):
     mag_matcher = re.compile(r'.*mag(?P<magID>\d+)')
     found_mags = {}
@@ -236,13 +249,18 @@ def find_mag_folders(dataset_base_path, log_fn):
                    .format(subdir))
     return found_mags
 
-def downsample_dataset(config, src_mag, trg_mag, log_fn):
+
+def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
     dataset_base_path = config.get('Project', 'target_path')
 
     num_workers = config.getint('Processing', 'num_downsampling_cores')
     buffer_size_in_cubes_downsampling = \
         config.getint('Processing', 'buffer_size_in_cubes_downsampling')
     num_write_workers = config.getint('Processing', 'num_write_workers')
+
+    cube_edge_len = config.getint('Processing', 'cube_edge_len')
+    keep_z_until_mag = config.getint('Processing', 'keep_z_until_mag', fallback=1)
+    exp_name = config.get('Project', 'exp_name')
 
     mag_matcher = re.compile(r'.*mag(?P<magID>\d+)')
     found_mags = find_mag_folders(dataset_base_path, log_fn)
@@ -264,10 +282,10 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     log_fn("Analysing source dataset... (mag{0})".format(src_mag))
 
     # we walk through the dataset structure and collect all available cubes
-    from_raw, all_cubes = get_list_of_all_cubes_in_dataset(
-        dataset_base_path + '/' + found_mags[src_mag], log_fn)
-
-    cube_edge_len = config.getint('Processing', 'cube_edge_len')
+    # the only reason this is done is to get the dimensions in cubes.
+    # this is super wasteful for large datasets, so instead added cur_ncubes argument.
+    from_raw, all_cubes, ext = get_list_of_all_cubes_in_dataset(
+        dataset_base_path + '/' + found_mags[src_mag], log_fn, ext_only=True)
 
     source_dtype = None
     if 'source_dtype' in config['Dataset']:
@@ -281,44 +299,40 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
             log_fn("from 8 bit raw")
             source_dtype = np.uint8
 
-    # -> extract x,y,z src dataset dimensions in cubes
-    cube_coord_matcher = re.compile(r'.*x(?P<x>\d+)_y(?P<y>\d+)_z('
-                                    r'?P<z>\d+)\.(jpg|png|raw)$')
-
-    max_x = 0
-    max_y = 0
-    max_z = 0
-
-    path_hash = {}
-
-
-    for this_cube_path in all_cubes:
-        mobj = cube_coord_matcher.search(this_cube_path)
-
-        try:
-            x = int(mobj.group('x'))
-            y = int(mobj.group('y'))
-            z = int(mobj.group('z'))
-
-        except:
-            raise Exception("Error: Corrupt cube filename in list: {0}"
-                            .format(this_cube_path))
-
-        path_hash[(x, y, z)] = this_cube_path
-
-        if x > max_x:
-            max_x = int(mobj.group('x'))
-        if y > max_y:
-            max_y = int(mobj.group('y'))
-        if z > max_z:
-            max_z = int(mobj.group('z'))
+    # # -> extract x,y,z src dataset dimensions in cubes
+    # cube_coord_matcher = re.compile(r'.*x(?P<x>\d+)_y(?P<y>\d+)_z('
+    #                                 r'?P<z>\d+)\.(jpg|png|raw)$')
+    # max_x = 0
+    # max_y = 0
+    # max_z = 0
+    # path_hash = {}
+    # for this_cube_path in all_cubes:
+    #     mobj = cube_coord_matcher.search(this_cube_path)
+    #
+    #     try:
+    #         x = int(mobj.group('x'))
+    #         y = int(mobj.group('y'))
+    #         z = int(mobj.group('z'))
+    #
+    #     except:
+    #         raise Exception("Error: Corrupt cube filename in list: {0}"
+    #                         .format(this_cube_path))
+    #
+    #     path_hash[(x, y, z)] = this_cube_path
+    #
+    #     if x > max_x:
+    #         max_x = int(mobj.group('x'))
+    #     if y > max_y:
+    #         max_y = int(mobj.group('y'))
+    #     if z > max_z:
+    #         max_z = int(mobj.group('z'))
+    max_x, max_y, max_z = [x-1 for x in cur_ncubes]
+    zanisotrop = (trg_mag <= keep_z_until_mag)
 
     if max_x < 1 and max_y < 1 and max_z < 1:
         # nothing to downsample, stopping
         log_fn("Further downsampling is useless, stopping.")
         return False
-
-    zanisotrop = trg_mag <= config.getint('Processing', 'keep_z_until_mag', fallback=1)
 
     out_path = dataset_base_path + '/mag' + str(trg_mag) + '/'
     log_fn("Downsampling to {0}, anisotropic z {1}".format(out_path, zanisotrop))
@@ -341,13 +355,23 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
     experimentname = re.compile(r"(?P<experimentname>.*)_mag.*\.(?P<extension>\w)").\
         search(os.path.basename(all_cubes[0])).group("experimentname")
 
+    # use this instead of skip_already_cubed_layers in order to parallelize / restart.
+    zcubes_rng = literal_eval(config.get('Processing', 'zcubes_rng'))
+    if zcubes_rng[0] < 0: zcubes_rng[0] = 0
+    if zcubes_rng[1] < 0: zcubes_rng[1] = max_z
+    assert(zcubes_rng[0] < zcubes_rng[1] and zcubes_rng[1] <= max_z)
+
     downsampling_job_info = []
     skipped_count = 0
-    skip_already_cubed_downsample_layers = config.getboolean('Processing', 'skip_already_cubed_downsample_layers')
     write_queue = mp.Queue(num_write_workers)
+    path_hash = {}
     for cur_x, cur_y, cur_z in itertools.product(range(0, max_x+2, 2),
                                                  range(0, max_y+2, 2),
-                                                 range(0, max_z+2, 2)):
+                                                 range(zcubes_rng, zcubes_rng+2, 2)):
+
+        # recreate the path/filename instead of traversing the previous mag.
+        path_hash[(cur_x, cur_y, cur_z)] =  make_cube_full_path(dataset_base_path, exp_name,
+                found_mags[src_mag], ext, cur_x, cur_y, cur_z)
 
         if cur_x > max_x or cur_y > max_y or cur_z > max_z:
             path_hash[(cur_x, cur_y, cur_z)] = 'bogus'
@@ -387,17 +411,9 @@ def downsample_dataset(config, src_mag, trg_mag, log_fn):
             this_job_info.trg_cube_path = get_cube_fname(dataset_base_path, experimentname,
                 trg_mag, cur_x // 2, cur_y // 2, cur_z // 2, extension)  #d int/int
 
-        if skip_already_cubed_downsample_layers and (\
-                os.path.exists(this_job_info.trg_cube_path) and
-                #os.path.exists(this_job_info.trg_cube_path.replace("png", "jpg"))\
-                (not zanisotrop or os.path.exists(this_job_info.trg_cube_path2))):
-                #and os.path.exists(this_job_info.trg_cube_path2.replace("png", "jpg"))):
-            #log_fn("path exists: {0}".format(this_job_info.trg_cube_path.replace("png", "{png,jpg}")))
-            skipped_count += 1
-        else:
-            #log_fn("not path exists: {0}".format(this_job_info.trg_cube_path))
-            #log_fn("not path exists: {0}".format(this_job_info.trg_cube_path2))
-            downsampling_job_info.append(this_job_info)
+        #log_fn("not path exists: {0}".format(this_job_info.trg_cube_path))
+        #log_fn("not path exists: {0}".format(this_job_info.trg_cube_path2))
+        downsampling_job_info.append(this_job_info)
 
     # Split up the downsampling into chunks that can be hold in memory. This
     # allows us to separate reading and writing from the storage,
@@ -553,34 +569,22 @@ def downsample_cube(job_info):
         for src_path in job_info.src_cube_paths:
             fadvise.willneed(src_path)
 
-        #time.sleep(0.2)
-
     skipped_count = 0
     for path_to_src_cube, src_coord in zip(job_info.src_cube_paths,
                                            job_info.src_cube_local_coords):
-        if path_to_src_cube == 'bogus':
+        if path_to_src_cube == 'bogus' or not os.path.isfile(path_to_src_cube):
+            skipped_count += 1
             continue
 
         if job_info.from_raw:
-            # Yes, I know the numpy fromfile function - this is significantly
-            # faster on our cluster
-            #content = ''
-            #buffersize=131072*2
+            # xxx - should rebenchmark this
+            # this_cube = np.fromfile(path_to_src_cube, dtype=job_info.source_dtype)
             fd = io.open(path_to_src_cube, 'rb')
-            #             # buffering = buffersize)
-            # for i in range(0, (cube_edge_len**3 / buffersize) + 1):
-            #    content += fd.read(buffersize)
-            #content = fd.read(-1)
             this_cube = np.frombuffer(fd.read(-1), dtype=job_info.source_dtype)
             fd.close()
-            # this_cube = np.fromfile(path_to_src_cube, dtype=job_info.source_dtype)
         else:
-            try:
-                with Image.open(path_to_src_cube) as load_image:
-                    this_cube = np.array(load_image)
-            except:
-                skipped_count += 1
-                continue
+            with Image.open(path_to_src_cube) as load_image:
+                this_cube = np.array(load_image)
 
         try:
             this_cube = this_cube.reshape([cube_edge_len, cube_edge_len, cube_edge_len])
@@ -588,9 +592,7 @@ def downsample_cube(job_info):
             print(path_to_src_cube)
             raise e
 
-        if job_info.config.getboolean('Processing', 'compress_source_downsampling_mag', fallback=False)\
-                and job_info.config.getint('Processing', 'first_downsampling_mag') == job_info.trg_mag:
-
+        if job_info.config.getboolean('Processing', 'compress_source_downsampling_mag', fallback=False):
             this_job_info = CompressionJobInfo()
             this_job_info.compressor = job_info.config.get('Compression', 'compression_algo')
             this_job_info.quality_or_ratio = job_info.config.getint('Compression', 'out_comp_quality')
@@ -598,22 +600,17 @@ def downsample_cube(job_info):
             this_job_info.pre_gauss = job_info.config.getfloat('Compression', 'pre_comp_gauss_filter')
             compress_cube(this_job_info, this_cube)
 
-        # NO swap here!
+        # NO swapaxes here!
         # new cuber removed 'F' order allocation and loading above, so swap is no longer necessary.
-        #this_cube = np.swapaxes(this_cube, 0, 2)
-        #this_cube = np.swapaxes(this_cube, 1, 2)
 
         down_block[src_coord[2]*cube_edge_len:src_coord[2]*cube_edge_len + cube_edge_len,
                    src_coord[1]*cube_edge_len:src_coord[1]*cube_edge_len + cube_edge_len,
                    src_coord[0]*cube_edge_len:src_coord[0]*cube_edge_len + cube_edge_len]\
             = this_cube
+    #for path_to_src_cube, src_coord in zip(job_info.src_cube_paths,
 
-        #down_block = np.swapaxes(down_block, 0, 1)
-    #raise()
+    if skipped_count == 8: return None
     del this_cube
-
-    if skipped_count == 8:
-        return None
 
     # It is not clear to me whether this zooming function does actually the
     # right thing. One should
@@ -822,7 +819,7 @@ def compress_cube_init(log_queue):
     compress_cube.log_queue = log_queue
 
 
-def write_compressed_cube(config, cube_data, prefix, cube_full_path, transpose, write_queue, iworker, icube):
+def write_compressed_cube(config, cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker, icube):
     if not os.path.exists(prefix):
         os.makedirs(prefix)
 
@@ -834,20 +831,20 @@ def write_compressed_cube(config, cube_data, prefix, cube_full_path, transpose, 
     this_job_info.pre_gauss = config.getfloat('Compression', 'pre_comp_gauss_filter')
 
     if 'raw' in this_job_info.compressor:
-        write_cube(cube_data, prefix, cube_full_path, transpose, write_queue, iworker, icube)
+        write_cube(cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker, icube)
     if this_job_info.compressor != 'raw':
         compress_cube(this_job_info, cube_data)
         d = {'nskipped':0, 'iworker':iworker, 'icube':icube}
         write_queue.put(d)
 
 
-def write_cube(cube_data, prefix, cube_full_path, transpose, write_queue, iworker, icube):
+def write_cube(cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker, icube):
     """TODO
     """
 
     if np.sum(cube_data) > 0:
         was_skipped = False
-        if transpose: cube_data = cube_data.T
+        if swap_xy: cube_data = np.swapaxes(cube_data, 1, 2)
 
         #ref_time=time.time()
         if not os.path.exists(prefix):
@@ -922,10 +919,7 @@ def init_from_source_dir(config, log_fn):
         print("No image files of format " + source_format + " was found.")
         sys.exit()
 
-
     all_source_files.sort(key=_natural_sort_key)
-
-
     num_z = len(all_source_files)
 
     # open the first image and extract the relevant information - all images are
@@ -943,7 +937,7 @@ def init_from_source_dir(config, log_fn):
         # allow cubing of one channel of color data
         if test_data.ndim > 2: test_data = test_data[:,:,source_channel]
         # knossos uses swapped xy axes relative to images
-        if same_knossos_as_tif_stack_xy_orientation: test_data = test_data.T
+        if same_knossos_as_tif_stack_xy_orientation: test_data = test_data.transpose()
         source_dims = test_data.shape
         source_dtype = test_data.dtype
         log_fn("\t done in {:.2f} s".format(time.time()-t,))
@@ -1010,7 +1004,7 @@ def read_zslice(iworker, local_z, source_format, source_file, transpose,
             this_layer = np.array(load_image)
         # allow cubing of one channel of color data
         if this_layer.ndim > 2: this_layer = this_layer[:,:,source_channel]
-        if transpose: this_layer = this_layer.T
+        if transpose: this_layer = this_layer.transpose()
 
     # the blocking is a throwback for using queues (2GB item limit) instead of shared memory.
     b = block_ranges
@@ -1030,7 +1024,7 @@ def read_zslice(iworker, local_z, source_format, source_file, transpose,
                     else:
                         rng = [[bcx[0],bcx[1]], [b[1][y][0],b[1][y][1]]]
                     chunk = big_img_load(source_file, rng=rng)
-                    if transpose: chunk = chunk.T
+                    if transpose: chunk = chunk.transpose()
                 else:
                     chunk = this_layer[bcx[0]:bcx[1],b[1][y][0]:b[1][y][1]]
                 this_layer_out_block[iworker + local_z, bdx[0]:bdx[1], b[1][y][0]:b[1][y][1]] = chunk
@@ -1061,10 +1055,10 @@ def make_mag1_cubes_from_z_stack(config,
 
     cube_edge_len = config.getint('Processing', 'cube_edge_len')
     # use this instead of skip_already_cubed_layers in order to parallelize / restart.
-    z_cubes_mag1_rng = literal_eval(config.get('Processing', 'z_cubes_mag1_rng'))
-    if z_cubes_mag1_rng[0] < 0: z_cubes_mag1_rng[0] = 0
-    if z_cubes_mag1_rng[1] < 0: z_cubes_mag1_rng[1] = num_z_cubes
-    assert(z_cubes_mag1_rng[0] < z_cubes_mag1_rng[1] and z_cubes_mag1_rng[1] <= num_z_cubes)
+    zcubes_rng = literal_eval(config.get('Processing', 'zcubes_rng'))
+    if zcubes_rng[0] < 0: zcubes_rng[0] = 0
+    if zcubes_rng[1] < 0: zcubes_rng[1] = num_z_cubes
+    assert(zcubes_rng[0] < zcubes_rng[1] and zcubes_rng[1] <= num_z_cubes)
 
     source_dtype = config.get('Dataset', 'source_dtype')
     if source_dtype == 'uint16':
@@ -1131,7 +1125,7 @@ def make_mag1_cubes_from_z_stack(config,
 
     # we iterate over the z cubes and handle cube layer after cube layer
     num_x_cubes = num_x_cubes_per_pass*num_passes_per_cube_layer
-    for cur_z in range(z_cubes_mag1_rng[0], z_cubes_mag1_rng[1]):
+    for cur_z in range(zcubes_rng[0], zcubes_rng[1]):
         log_fn("Cubing for z cube layer {} / {}".format(cur_z, num_z_cubes))
         for cur_pass in range(0, num_passes_per_cube_layer):
             xpass_range = [cur_pass * num_x_cubes_per_pass * cube_edge_len,
@@ -1205,17 +1199,8 @@ def make_mag1_cubes_from_z_stack(config,
                     y_end = (cur_y+1)*cube_edge_len
                     cube_data = this_layer_out_block[:, x_start:x_end, y_start:y_end]
 
-                    prefix = os.path.normpath(os.path.abspath(
-                        target_path + ('/mag%d' % (first_mag,)) + ('/x%04d/y%04d/z%04d/'
-                        % (glob_cur_x_cube, glob_cur_y_cube, glob_cur_z_cube)) ))
-
-                    cube_full_path = os.path.normpath(
-                        prefix + '/%s_mag%d_x%04d_y%04d_z%04d.raw'
-                        % (exp_name,
-                           first_mag,
-                           glob_cur_x_cube,
-                           glob_cur_y_cube,
-                           glob_cur_z_cube))
+                    prefix, cube_full_path = make_cube_full_path(target_path, exp_name, first_mag, 'raw',
+                            glob_cur_x_cube, glob_cur_y_cube, glob_cur_z_cube)
 
                     if cnt_write_workers > num_write_workers:
                         d = write_queue.get()
@@ -1292,6 +1277,8 @@ def knossos_cuber(config, log_fn):
     config.set('Dataset', 'boundaries', str(boundaries))
     dataset_base_path = config.get('Project', 'target_path')
     scale = literal_eval(config.get('Dataset', 'scaling'))
+    mag1_ncubes = [cubing_info.num_x_cubes_per_pass*cubing_info.num_passes_per_cube_layer,
+                   cubing_info.num_y_cubes, cubing_info.num_z_cubes]
 
     if perform_mag1_cubing:
         # this is for generating mags starting with isotropic voxels.
@@ -1319,6 +1306,9 @@ def knossos_cuber(config, log_fn):
         # q mags are always ints, right? (important for division below!)
         curr_mag = config.getint('Processing', 'first_downsampling_mag', fallback=2)
 
+        # for parallelization of mags, only run subset
+        dmag_rng = literal_eval(config.get('Processing', 'dmag_rng'))
+
         # `mags_to_gen' is specified like `2**20' in the configuration file.
         # To parse this number, the string has to be split at `**',
         # and then evaluated.
@@ -1328,12 +1318,16 @@ def knossos_cuber(config, log_fn):
 
         if not knossos_mag_names:
             mags_to_gen = int(np.log2(mags_to_gen))+1
+        cur_ncubes = mag1_ncubes
+        keep_z_until_mag = config.getint('Processing', 'keep_z_until_mag', fallback=1)
+        cnt_downsamples = 0
         while curr_mag <= mags_to_gen:
+            if cnt_downsamples < dmag_rng[0] or (dmag_rng[1] > 0 and cnt_downsamples >= dmag_rng): continue
             if knossos_mag_names:
                 prev_mag = curr_mag // 2
             else:
                 prev_mag = curr_mag - 1
-            worked = downsample_dataset(config, prev_mag, curr_mag, log_fn) #d int/int
+            worked = downsample_dataset(config, cur_ncubes, prev_mag, curr_mag, log_fn) #d int/int
 
             if worked:
                 log_fn("Mag {0} succesfully cubed.".format(curr_mag))
@@ -1344,6 +1338,16 @@ def knossos_cuber(config, log_fn):
             else:
                 log_fn("Done with downsampling.")
                 break
+
+            # use this instead of iterating all the cubes every time.
+            #   this takes a huge amount of time for large datasets and
+            #   so is not worth it if we only need the current dimensions in cubes.
+            next_ncubes = [int(np.ceil(x/2.)) for x in cur_ncubes]
+            if curr_mag <= keep_z_until_mag: next_ncubes[2] = cur_ncubes[2]
+            cur_ncubes = next_ncubes
+
+            cnt_downsamples += 1
+        #while curr_mag <= mags_to_gen:
 
         log_fn("All mags generated. Took {0:.4f} h."
                .format((time.time() - total_down_ref_time)/3600))
@@ -1471,8 +1475,11 @@ def create_parser():
              "source format via the command line.",
         default='config.ini')
 
-    parser.add_argument('--z-cubes-mag1-rng', nargs=2, type=int, default=[-1,-1],
+    # these are for process parallelization
+    parser.add_argument('--zcubes-rng', nargs=2, type=int, default=[-1,-1],
         help='only cube this range of z-cubes in mag1 (default to all)')
+    parser.add_argument('--dmag-rng', nargs=2, type=int, default=[-1,-1],
+        help='only downsample this range of mags (default to all specified)')
 
     return parser
 
@@ -1516,7 +1523,8 @@ def main():
     if ARGS.keep_z_until_mag is not None:
         CONFIG.set('Processing', 'keep_z_until_mag', ARGS.keep_z_until_mag)
     #print('keep_z_until_mag', CONFIG['Processing']['keep_z_until_mag'])
-    CONFIG.set('Processing', 'z_cubes_mag1_rng', str(ARGS.z_cubes_mag1_rng))
+    CONFIG.set('Processing', 'zcubes_rng', str(ARGS.zcubes_rng))
+    CONFIG.set('Processing', 'dmag_rng', str(ARGS.dmag_rng))
 
     if validate_config(CONFIG):
         knossos_cuber(CONFIG, lambda x: sys.stdout.write(str(x) + '\n'))
