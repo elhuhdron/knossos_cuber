@@ -49,9 +49,9 @@ import h5py
 #import skimage.transform
 #from skimage import measure
 
-import psutil
-def get_mem_usage():
-    return psutil.Process(os.getpid()).memory_info().rss // 2**20
+# import psutil
+# def get_mem_usage():
+#     return psutil.Process(os.getpid()).memory_info().rss // 2**20
 
 #import libtiff
 #import tifffile
@@ -369,9 +369,13 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
                                                  range(0, max_y+2, 2),
                                                  range(zcubes_rng[0], zcubes_rng[1]+2, 2)):
 
-        # recreate the path/filename instead of traversing the previous mag.
+        # recreate the paths/filenames instead of traversing the previous mag.
+        # the downsample job will deal with cubes being there or not.
         path_hash[(cur_x, cur_y, cur_z)] = make_cube_full_path(dataset_base_path, exp_name,
                 isrc_mag, ext, cur_x, cur_y, cur_z)[1]
+        for lx, ly, lz in itertools.product([0, 1], [0, 1], [0, 1]):
+            path_hash[(cur_x + lx, cur_y + ly, cur_z + lz)] = make_cube_full_path(dataset_base_path, exp_name,
+                    isrc_mag, ext, cur_x + lx, cur_y + ly, cur_z + lz)[1]
 
         if cur_x > max_x or cur_y > max_y or cur_z > max_z:
             path_hash[(cur_x, cur_y, cur_z)] = 'bogus'
@@ -379,7 +383,6 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
         these_cubes = []
         these_cubes_local_coords = []
         for lx, ly, lz in itertools.product([0, 1], [0, 1], [0, 1]):
-
             # fill up the borders with black
             pos = (cur_x + lx, cur_y + ly, cur_z + lz)
             if pos not in path_hash:
@@ -402,7 +405,7 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
 
         # out_path = out_path.replace('mag'+str(src_mag), 'mag'+str(trg_mag))
         extension = ".jpg"
-        if zanisotrop: # TODO
+        if zanisotrop:
             this_job_info.trg_cube_path = get_cube_fname(dataset_base_path, experimentname,
                 trg_mag, cur_x // 2, cur_y // 2, cur_z, extension)  #d int/int
             this_job_info.trg_cube_path2 = get_cube_fname(dataset_base_path, experimentname,
@@ -463,7 +466,7 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
     #nskipped_cubes = [0,0]
     nskipped_cubes = 0
     for chunk_id, this_job_chunk in enumerate(chunked_jobs):
-        log_fn('Memory usage {0} MB'.format(get_mem_usage()))
+        #log_fn('Memory usage {0} MB'.format(get_mem_usage()))
 
         chunk_time = time.time()
 
@@ -639,6 +642,8 @@ def downsample_cube(job_info, iworker, write_queue):
         write_queue.put(d)
         return
 
+    # xxx - this is an old comment, my typical approach is actually "pixel mixing" below.
+    #   decided to just stick to this method... maybe users are used to how this looks?
     # It is not clear to me whether this zooming function does actually the
     # right thing. One should
     # first filter the data and then
@@ -671,14 +676,13 @@ def downsample_cube(job_info, iworker, write_queue):
         # cval=0.0,
         )
 
-    #print('worker {} writing'.format(iworker))
+    # some other old previously commented method
     # for i in range(0, down_block.shape[0]):
     #     down_block[i] = scipy.ndimage.gaussian_filter(
     #         down_block[i],
     #         sigma=0.35 * 0.5,
     #         mode='mirror')
     # down_block = down_block[:, ::2, ::2]
-
     # down_block = skimage.transform.resize(down_block,
     #                                       output_shape=[256, 128, 128],
     #                                       mode='symmetric',
@@ -686,6 +690,7 @@ def downsample_cube(job_info, iworker, write_queue):
     #                                       #anti_aliasing=True
     # ).astype(job_info.source_dtype)
 
+    # the "pixel-mixing" method
     ## use block-reduce method
     #block_size = (1,2,2) if job_info.trg_cube_path2 else (2,2,2)
     ##down_block = measure.block_reduce(down_block, block_size=block_size,
@@ -693,12 +698,7 @@ def downsample_cube(job_info, iworker, write_queue):
     #down_block = measure.block_reduce(down_block, block_size=block_size,
     #    func=np.mean).astype(job_info.source_dtype)
 
-    # extract directory of out_path
-    #if not os.path.exists(os.path.dirname(job_info.trg_cube_path)):
-    #    os.makedirs(os.path.dirname(job_info.trg_cube_path))
-
-    #down_block.tofile(job_info.trg_cube_path)
-
+    #print('worker {} writing'.format(iworker))
     # as a part of simplifying the downsampling away from mp.Pool, just write the cube(s) immediately
     skipped_cnt = 0
     skipped_cnt += write_compressed_cube(job_info.config, down_block[:cube_edge_len, :, :],
