@@ -253,10 +253,10 @@ def find_mag_folders(dataset_base_path, log_fn):
 def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
     dataset_base_path = config.get('Project', 'target_path')
 
-    num_workers = config.getint('Processing', 'num_downsampling_cores')
-    buffer_size_in_cubes_downsampling = \
-        config.getint('Processing', 'buffer_size_in_cubes_downsampling')
-    num_write_workers = config.getint('Processing', 'num_write_workers')
+    num_write_workers = config.getint('Processing', 'num_downsampling_cores')
+    # buffer_size_in_cubes_downsampling = \
+    #     config.getint('Processing', 'buffer_size_in_cubes_downsampling')
+    #num_write_workers = config.getint('Processing', 'num_write_workers')
 
     cube_edge_len = config.getint('Processing', 'cube_edge_len')
     keep_z_until_mag = config.getint('Processing', 'keep_z_until_mag', fallback=1)
@@ -417,22 +417,31 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
         #log_fn("not path exists: {0}".format(this_job_info.trg_cube_path2))
         downsampling_job_info.append(this_job_info)
 
+    # At this point the cuber may be barely recognizable... substantial modifications to the original.
+    #   xxx - once this is working, just delete most of this commented code.
+    #   xxx - compression has not been tested after these substantial modifications
+    #   Re-simplified to get rid of mp.Pool, always a nightmare somehow by memory consumption,
+    #     and just go back to having the downsampling processes write the cube.
+    #   Piping cubes back from other processes is also very compute intensive.
+    #   There is significant cost for MP when lots of data needs to be shared.
+    # This was the previous claim, not convinced it was properly benchmarked:
     # Split up the downsampling into chunks that can be hold in memory. This
     # allows us to separate reading and writing from the storage,
     # often massively increasing the IO performance
 
-    if len(downsampling_job_info) > buffer_size_in_cubes_downsampling:
-        # split the jobs in chunks
-
-        # how many chunks do we need?
-        scl = 2 if zanisotrop else 1
-        chunks_required = int(np.ceil(len(downsampling_job_info)*scl / buffer_size_in_cubes_downsampling))
-
-        chunked_jobs = np.array_split(downsampling_job_info, chunks_required)
-        # convert back to python list
-        chunked_jobs = [el.tolist() for el in chunked_jobs]
-    else:
-        chunked_jobs = [downsampling_job_info]
+    # if len(downsampling_job_info) > buffer_size_in_cubes_downsampling:
+    #     # split the jobs in chunks
+    #
+    #     # how many chunks do we need?
+    #     scl = 2 if zanisotrop else 1
+    #     chunks_required = int(np.ceil(len(downsampling_job_info)*scl / buffer_size_in_cubes_downsampling))
+    #
+    #     chunked_jobs = np.array_split(downsampling_job_info, chunks_required)
+    #     # convert back to python list
+    #     chunked_jobs = [el.tolist() for el in chunked_jobs]
+    # else:
+    #     chunked_jobs = [downsampling_job_info]
+    chunked_jobs = [downsampling_job_info]
 
     log_fn("{0} ds jobs to run in {1} chunks, {2} skipped, {3} total".format(len(downsampling_job_info),
            len(chunked_jobs), skipped_count, len(downsampling_job_info) + skipped_count))
@@ -440,46 +449,43 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
     if len(downsampling_job_info) == 0:
         return True
 
-    log_queue = mp.Queue()
-
     job_prep_time = time.time() - job_prep_time
     log_fn("Job preparation took {0:.2f} s".format(job_prep_time))
 
-    worker_pool = mp.Pool(num_workers, downsample_cube_init, [log_queue], maxtasksperchild=num_workers)
 
+    #log_queue = mp.Queue()
+    #worker_pool = mp.Pool(num_workers, downsample_cube_init, [log_queue], maxtasksperchild=num_workers)
+
+    write_workers = []
+    cnt_write_workers = 0
+    cube_write_time = time.time()
+    nskipped_cubes = [0,0]
     for chunk_id, this_job_chunk in enumerate(chunked_jobs):
         log_fn('Memory usage {0} MB'.format(get_mem_usage()))
 
         chunk_time = time.time()
 
-        log_fn("Starting {0} workers...".format(num_workers))
+        log_fn("Starting {0} workers...".format(num_write_workers))
         log_fn("First cube (of {0}) in chunk {1} (of {2}): {3}"
                .format(len(this_job_chunk), chunk_id, len(chunked_jobs), this_job_chunk[0].trg_cube_path))
 
-        ref_time = time.time()
-
-        log_fn("Downsampling…")
-        cubes = worker_pool.map(downsample_cube, this_job_chunk, chunksize=10)
+        # ref_time = time.time()
+        # log_fn("Downsampling…")
+        #cubes = worker_pool.map(downsample_cube, this_job_chunk, chunksize=10)
         #worker_pool.close()
+        # while not log_queue.empty():
+        #     log_output = log_queue.get()
+        #     log_fn(log_output)
+        # #cubes = map(downsample_cube, this_job_chunk)
+        # #worker_pool.join()
+        # log_fn("Downsampling took {0:.2f} s (on avg per cube {1} s)"
+        #        .format(time.time() - ref_time
+        #        , (time.time() - ref_time) / len(this_job_chunk))) #d float/int
 
-        while not log_queue.empty():
-            log_output = log_queue.get()
-            log_fn(log_output)
-        #cubes = map(downsample_cube, this_job_chunk)
-
-        #worker_pool.join()
-
-        log_fn("Downsampling took {0:.2f} s (on avg per cube {1} s)"
-               .format(time.time() - ref_time
-               , (time.time() - ref_time) / len(this_job_chunk))) #d float/int
-
-        log_fn("Writing (and compressing)…")
-        write_workers = []
-        cnt_write_workers = 0
-        cube_write_time = time.time()
-        nskipped_cubes = [0,0]
+        log_fn("Downsampling, writing (and compressing)…")
         # start writing the cubes
-        for cube_data, job_info in zip(cubes, this_job_chunk):
+        #for cube_data, job_info in zip(cubes, this_job_chunk):
+        for job_info in this_job_chunk:
             # Changed this bogus thing here to the skip count in downsampling,
             #   so that completely all zero downsamnpled blocks are also skipped.
             #   cube_data is returned as None in those cases.
@@ -487,17 +493,17 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
             #     if chunk.trg_cube_path != 'bogus':
             #         prefix = os.path.dirname(chunk.trg_cube_path)
             #         break
-            if cube_data is None:
-                #print("Skipped cube {0}".format(job_info.trg_cube_path))
-                nskipped_cubes[0] += 1; nskipped_cubes[1] += 1
-                continue
 
-            if job_info.trg_cube_path2:
-                first_cube = cube_data[:cube_edge_len, :, :]
-                second_cube = cube_data[cube_edge_len:, :, :]
-            else:
-                first_cube = cube_data
-                second_cube = None
+            # if cube_data is None:
+            #     #print("Skipped cube {0}".format(job_info.trg_cube_path))
+            #     nskipped_cubes[0] += 1; nskipped_cubes[1] += 1
+            #     continue
+            # if job_info.trg_cube_path2:
+            #     first_cube = cube_data[:cube_edge_len, :, :]
+            #     second_cube = cube_data[cube_edge_len:, :, :]
+            # else:
+            #     first_cube = cube_data
+            #     second_cube = None
 
             if cnt_write_workers > num_write_workers:
                 d = write_queue.get()
@@ -506,20 +512,25 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
                 write_workers[d['iworker']].close()
                 cnt_write_workers -= 1
 
-            cur_worker = mp.Process(target=write_compressed_cube, args=(config, first_cube,
-                os.path.dirname(job_info.trg_cube_path), job_info.trg_cube_path,
-                False, write_queue, len(write_workers), 0))
+            cur_worker = mp.Process(target=downsample_cube, args=(job_info, len(write_workers), write_queue))
             cur_worker.start()
             write_workers.append(cur_worker)
             cnt_write_workers += 1
 
-            if job_info.trg_cube_path2:
-                cur_worker = mp.Process(target=write_compressed_cube, args=(config, second_cube,
-                    os.path.dirname(job_info.trg_cube_path2), job_info.trg_cube_path2,
-                    False, write_queue, len(write_workers), 1))
-                cur_worker.start()
-                write_workers.append(cur_worker)
-                cnt_write_workers += 1
+            # cur_worker = mp.Process(target=write_compressed_cube, args=(config, first_cube,
+            #     os.path.dirname(job_info.trg_cube_path), job_info.trg_cube_path,
+            #     False, write_queue, len(write_workers), 0))
+            # cur_worker.start()
+            # write_workers.append(cur_worker)
+            # cnt_write_workers += 1
+            #
+            # if job_info.trg_cube_path2:
+            #     cur_worker = mp.Process(target=write_compressed_cube, args=(config, second_cube,
+            #         os.path.dirname(job_info.trg_cube_path2), job_info.trg_cube_path2,
+            #         False, write_queue, len(write_workers), 1))
+            #     cur_worker.start()
+            #     write_workers.append(cur_worker)
+            #     cnt_write_workers += 1
         # for cube_data, job_info in zip(cubes, this_job_chunk):
 
         # wait until all writes are finished
@@ -542,16 +553,16 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
         else:
             log_fn("Skipped complete chunk in {0:.6f} s".format(chunk_time))
 
-        for x in cubes: del x
-        del first_cube, second_cube, cube_data, cubes, job_info, this_job_chunk
-
-    worker_pool.close()
-    worker_pool.join()
+    #     for x in cubes: del x
+    #     del first_cube, second_cube, cube_data, cubes, job_info, this_job_chunk
+    #
+    # worker_pool.close()
+    # worker_pool.join()
 
     return True
 
 
-def downsample_cube(job_info):
+def downsample_cube(job_info, iworker, write_queue):
     """TODO
 
     Args:
@@ -673,16 +684,26 @@ def downsample_cube(job_info):
 
     #down_block.tofile(job_info.trg_cube_path)
 
-    return down_block
+    # as a part of simplifying the downsampling away from mp.Pool, just write the cube(s) immediately
+    write_compressed_cube(job_info.config, down_block[:cube_edge_len, :, :],
+        os.path.dirname(job_info.trg_cube_path), job_info.trg_cube_path,
+        False, write_queue, iworker, 0)
+    if job_info.trg_cube_path2:
+        write_compressed_cube(job_info.config, down_block[cube_edge_len:, :, :],
+            os.path.dirname(job_info.trg_cube_path2), job_info.trg_cube_path2,
+            False, write_queue, iworker, 1)
+
+    #return down_block
 
 
-def downsample_cube_init(log_queue):
-    """TODO
-    """
+# def downsample_cube_init(log_queue):
+#     """TODO
+#     """
+#
+#     downsample_cube.log_queue = log_queue
 
-    downsample_cube.log_queue = log_queue
 
-
+# xxx - this has not been tested in this substantially modified cuber.
 def compress_dataset(config, log_fn):
     """TODO
     """
