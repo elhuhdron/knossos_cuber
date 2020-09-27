@@ -551,19 +551,19 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
             nskipped_cubes += d['nskipped']
             write_workers[d['iworker']].join()
             write_workers[d['iworker']].close()
+            count_completed_writes += 1
         write_workers = []
 
         cube_write_time = time.time() - cube_write_time
         chunk_time = time.time() - chunk_time
 
-        if len(write_workers) > 0:
-            log_fn("Writing {0} cubes took {1:.2f} s (on avg {2} s per cube)"
-                   .format(len(write_workers), cube_write_time, cube_write_time / len(write_workers)))
-            log_fn("Processing chunk took {0:.2f} s (on avg per cube {1} s)"
-                   .format(chunk_time, chunk_time / len(this_job_chunk)))
-            log_fn("Skipped {0} empty first and {1} empty second cubes".format(nskipped_cubes[0], nskipped_cubes[1]))
-        else:
-            log_fn("Skipped complete chunk in {0:.6f} s".format(chunk_time))
+        log_fn("Writing {0} cubes took {1:.2f} s (on avg {2} s per cube)"
+            .format(count_completed_writes, cube_write_time,
+                cube_write_time / (count_completed_writes-nskipped_cubes)))
+        log_fn("Processing chunk took {0:.2f} s (on avg per cube {1} s)"
+               .format(chunk_time, chunk_time / len(this_job_chunk)))
+        log_fn("Skipped {0} empty cubes".format(nskipped_cubes,))
+    #for chunk_id, this_job_chunk in enumerate(chunked_jobs):
 
     #     for x in cubes: del x
     #     del first_cube, second_cube, cube_data, cubes, job_info, this_job_chunk
@@ -1022,10 +1022,10 @@ def init_from_source_dir(config, log_fn):
                (num_passes_per_cube_layer,num_x_cubes_per_pass))
 
     CubingInfo = namedtuple('CubingInfo',
-                            'num_x_cubes_per_pass num_y_cubes num_z_cubes '
+                            'num_x_cubes num_x_cubes_per_pass num_y_cubes num_z_cubes '
                             'all_source_files num_passes_per_cube_layer')
 
-    cube_info = CubingInfo(num_x_cubes_per_pass,
+    cube_info = CubingInfo(num_x_cubes, num_x_cubes_per_pass,
                            num_y_cubes,
                            num_z_cubes,
                            all_source_files,
@@ -1322,8 +1322,7 @@ def knossos_cuber(config, log_fn):
     config.set('Dataset', 'boundaries', str(boundaries))
     dataset_base_path = config.get('Project', 'target_path')
     scale = literal_eval(config.get('Dataset', 'scaling'))
-    mag1_ncubes = [cubing_info.num_x_cubes_per_pass*cubing_info.num_passes_per_cube_layer,
-                   cubing_info.num_y_cubes, cubing_info.num_z_cubes]
+    mag1_ncubes = [cubing_info.num_x_cubes, cubing_info.num_y_cubes, cubing_info.num_z_cubes]
 
     if perform_mag1_cubing:
         # this is for generating mags starting with isotropic voxels.
