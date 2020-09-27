@@ -206,8 +206,7 @@ def write_knossos_conf(data_set_base_folder='',
                        cube_edge_len=128):
     """Writes a knossos.conf file for the use with KNOSSOS."""
 
-    if not os.path.exists(data_set_base_folder):
-        os.makedirs(data_set_base_folder)
+    os.makedirs(data_set_base_folder, exist_ok=True)
 
     with open(data_set_base_folder + '{0}.k.conf'.format(exp_name), 'w') as conf_file:
         conf_file.write("experiment name \"{0}\";\n".format(exp_name))
@@ -342,8 +341,7 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
 
     # create dummy K conf for mag detection
     magpath = dataset_base_path + '/mag' + str(trg_mag) + '/';
-    if not os.path.exists(magpath):
-        os.makedirs(magpath)
+    os.makedirs(magpath, exist_ok=True)
     fh=open(magpath + '/knossos.conf', 'w'); fh.close()
 
     # compile the 8 cubes that belong together, no overlap, set to 'bogus' at
@@ -458,8 +456,12 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
 
     write_workers = []
     cnt_write_workers = 0
+    count_completed_writes = 0
+    print_every = 2000
+    ref_time = time.time()
     cube_write_time = time.time()
-    nskipped_cubes = [0,0]
+    #nskipped_cubes = [0,0]
+    nskipped_cubes = 0
     for chunk_id, this_job_chunk in enumerate(chunked_jobs):
         log_fn('Memory usage {0} MB'.format(get_mem_usage()))
 
@@ -507,10 +509,16 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
 
             if cnt_write_workers > num_write_workers:
                 d = write_queue.get()
-                nskipped_cubes[d['icube']] += d['nskipped']
+                #nskipped_cubes[d['icube']] += d['nskipped']
+                nskipped_cubes += d['nskipped']
                 write_workers[d['iworker']].join()
                 write_workers[d['iworker']].close()
                 cnt_write_workers -= 1
+                count_completed_writes += 1
+            if count_completed_writes > 0 and count_completed_writes % print_every == 0:
+                print('{} downsampled and written cubes in  {:.2f} s'.format(count_completed_writes,
+                    time.time()-ref_time))
+                ref_time = time.time()
 
             cur_worker = mp.Process(target=downsample_cube, args=(job_info, len(write_workers), write_queue))
             cur_worker.start()
@@ -536,7 +544,8 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
         # wait until all writes are finished
         for i in range(cnt_write_workers):
             d = write_queue.get()
-            nskipped_cubes[d['icube']] += d['nskipped']
+            #nskipped_cubes[d['icube']] += d['nskipped']
+            nskipped_cubes += d['nskipped']
             write_workers[d['iworker']].join()
             write_workers[d['iworker']].close()
         write_workers = []
@@ -569,6 +578,7 @@ def downsample_cube(job_info, iworker, write_queue):
         job_info (downsample_job_info):
             An object that holds data required for downsampling.
     """
+    #print('worker {} started'.format(iworker))
 
     # the first cube in the list contains the new coordinate of the created
     # downsampled out-cube
@@ -622,8 +632,12 @@ def downsample_cube(job_info, iworker, write_queue):
             = this_cube
     #for path_to_src_cube, src_coord in zip(job_info.src_cube_paths,
 
-    if skipped_count == 8: return None
-    del this_cube
+    #print('worker {} enumerated, skipped count {}'.format(iworker, skipped_count))
+
+    if skipped_count == 8:
+        d = {'nskipped':2 if job_info.trg_cube_path2 else 1, 'iworker':iworker}
+        write_queue.put(d)
+        return
 
     # It is not clear to me whether this zooming function does actually the
     # right thing. One should
@@ -657,6 +671,7 @@ def downsample_cube(job_info, iworker, write_queue):
         # cval=0.0,
         )
 
+    #print('worker {} writing'.format(iworker))
     # for i in range(0, down_block.shape[0]):
     #     down_block[i] = scipy.ndimage.gaussian_filter(
     #         down_block[i],
@@ -685,15 +700,17 @@ def downsample_cube(job_info, iworker, write_queue):
     #down_block.tofile(job_info.trg_cube_path)
 
     # as a part of simplifying the downsampling away from mp.Pool, just write the cube(s) immediately
-    write_compressed_cube(job_info.config, down_block[:cube_edge_len, :, :],
-        os.path.dirname(job_info.trg_cube_path), job_info.trg_cube_path,
-        False, write_queue, iworker, 0)
+    skipped_cnt = 0
+    skipped_cnt += write_compressed_cube(job_info.config, down_block[:cube_edge_len, :, :],
+        os.path.dirname(job_info.trg_cube_path), job_info.trg_cube_path, False, None, iworker)
     if job_info.trg_cube_path2:
-        write_compressed_cube(job_info.config, down_block[cube_edge_len:, :, :],
-            os.path.dirname(job_info.trg_cube_path2), job_info.trg_cube_path2,
-            False, write_queue, iworker, 1)
+        skipped_cnt += write_compressed_cube(job_info.config, down_block[cube_edge_len:, :, :],
+            os.path.dirname(job_info.trg_cube_path2), job_info.trg_cube_path2, False, None, iworker)
+    d = {'nskipped':skipped_cnt, 'iworker':iworker}
+    write_queue.put(d)
 
     #return down_block
+    #print('worker {} completed'.format(iworker))
 
 
 # def downsample_cube_init(log_queue):
@@ -842,9 +859,8 @@ def compress_cube_init(log_queue):
     compress_cube.log_queue = log_queue
 
 
-def write_compressed_cube(config, cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker, icube):
-    if not os.path.exists(prefix):
-        os.makedirs(prefix)
+def write_compressed_cube(config, cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker):
+    os.makedirs(prefix, exist_ok=True)
 
     this_job_info = CompressionJobInfo()
 
@@ -854,14 +870,15 @@ def write_compressed_cube(config, cube_data, prefix, cube_full_path, swap_xy, wr
     this_job_info.pre_gauss = config.getfloat('Compression', 'pre_comp_gauss_filter')
 
     if 'raw' in this_job_info.compressor:
-        write_cube(cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker, icube)
+        return write_cube(cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker)
     if this_job_info.compressor != 'raw':
         compress_cube(this_job_info, cube_data)
-        d = {'nskipped':0, 'iworker':iworker, 'icube':icube}
-        write_queue.put(d)
+        if write_queue is not None:
+            d = {'nskipped':0, 'iworker':iworker}
+            write_queue.put(d)
 
 
-def write_cube(cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker, icube):
+def write_cube(cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker):
     """TODO
     """
 
@@ -870,9 +887,7 @@ def write_cube(cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker,
         if swap_xy: cube_data = np.swapaxes(cube_data, 1, 2)
 
         #ref_time=time.time()
-        if not os.path.exists(prefix):
-            os.makedirs(prefix)
-
+        os.makedirs(prefix, exist_ok=True)
         try:
             cube_data.tofile(os.path.splitext(cube_full_path)[0] + '.raw')
             #print("writing took: {0}s".format(time.time()-ref_time))
@@ -882,8 +897,11 @@ def write_cube(cube_data, prefix, cube_full_path, swap_xy, write_queue, iworker,
     else:
         was_skipped = True
 
-    d = {'nskipped':int(was_skipped), 'iworker':iworker, 'icube':icube}
-    write_queue.put(d)
+    if write_queue is not None:
+        d = {'nskipped':int(was_skipped), 'iworker':iworker}
+        write_queue.put(d)
+    else:
+        return int(was_skipped)
 
 
 def _natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
@@ -1237,7 +1255,7 @@ def make_mag1_cubes_from_z_stack(config,
                         cnt_write_workers -= 1
 
                     cur_worker = mp.Process(target=write_cube, args=(cube_data, prefix, cube_full_path,
-                            same_knossos_as_tif_stack_xy_orientation, write_queue, len(write_workers), 0))
+                            same_knossos_as_tif_stack_xy_orientation, write_queue, len(write_workers)))
                     cur_worker.start()
                     write_workers.append(cur_worker)
                     cnt_write_workers += 1
@@ -1320,7 +1338,7 @@ def knossos_cuber(config, log_fn):
 
         total_mag1_time = time.time() - mag1_ref_time
 
-        log_fn("Mag 1 succesfully cubed. Took {0:.4f} h".format(total_mag1_time/3600)) #d f/i
+        log_fn("Mag 1 successfully cubed. Took {0:.4f} h".format(total_mag1_time/3600)) #d f/i
 
     knossos_mag_names = config.get('Dataset', 'mag_names', fallback="knossos").lower() == "knossos"
     if knossos_mag_names:
@@ -1349,22 +1367,18 @@ def knossos_cuber(config, log_fn):
         keep_z_until_mag = config.getint('Processing', 'keep_z_until_mag', fallback=1)
         cnt_downsamples = 0
         while curr_mag <= mags_to_gen:
-            if cnt_downsamples < dmag_rng[0] or (dmag_rng[1] > 0 and cnt_downsamples >= dmag_rng[1]): continue
-            if knossos_mag_names:
-                prev_mag = curr_mag // 2
-            else:
-                prev_mag = curr_mag - 1
-            worked = downsample_dataset(config, cur_ncubes, prev_mag, curr_mag, log_fn) #d int/int
-
-            if worked:
-                log_fn("Mag {0} succesfully cubed.".format(curr_mag))
+            if not (cnt_downsamples < dmag_rng[0] or (dmag_rng[1] > 0 and cnt_downsamples >= dmag_rng[1])):
                 if knossos_mag_names:
-                    curr_mag *= 2
+                    prev_mag = curr_mag // 2
                 else:
-                    curr_mag += 1
-            else:
-                log_fn("Done with downsampling.")
-                break
+                    prev_mag = curr_mag - 1
+                worked = downsample_dataset(config, cur_ncubes, prev_mag, curr_mag, log_fn) #d int/int
+
+                if worked:
+                    log_fn("Mag {0} successfully cubed.".format(curr_mag))
+                else:
+                    log_fn("Done with downsampling.")
+                    break
 
             # use this instead of iterating all the cubes every time.
             #   this takes a huge amount of time for large datasets and
@@ -1373,6 +1387,11 @@ def knossos_cuber(config, log_fn):
             if curr_mag <= keep_z_until_mag: next_ncubes[2] = cur_ncubes[2]
             cur_ncubes = next_ncubes
 
+            # "increment" to next mag
+            if knossos_mag_names:
+                curr_mag *= 2
+            else:
+                curr_mag += 1
             cnt_downsamples += 1
         #while curr_mag <= mags_to_gen:
 
