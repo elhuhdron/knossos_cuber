@@ -359,19 +359,21 @@ def downsample_dataset(config, cur_ncubes, src_mag, trg_mag, log_fn):
     zcubes_rng = literal_eval(config.get('Processing', 'zcubes_rng'))
     if zcubes_rng[0] < 0: zcubes_rng[0] = 0
     if zcubes_rng[1] < 0: zcubes_rng[1] = max_z
-    assert(zcubes_rng[0] < zcubes_rng[1] and zcubes_rng[1] <= max_z)
+    else: zcubes_rng[1] -= 1 # to avoid range overlap confusions from the +2 below
+    assert(zcubes_rng[0] <= zcubes_rng[1] and zcubes_rng[1] <= max_z)
 
     downsampling_job_info = []
     skipped_count = 0
     write_queue = mp.Queue(num_write_workers)
     path_hash = {}
+    isrc_mag = int(re.match('.*?([0-9]+)$', found_mags[src_mag]).group(1))
     for cur_x, cur_y, cur_z in itertools.product(range(0, max_x+2, 2),
                                                  range(0, max_y+2, 2),
-                                                 range(zcubes_rng, zcubes_rng+2, 2)):
+                                                 range(zcubes_rng[0], zcubes_rng[1]+2, 2)):
 
         # recreate the path/filename instead of traversing the previous mag.
-        path_hash[(cur_x, cur_y, cur_z)] =  make_cube_full_path(dataset_base_path, exp_name,
-                found_mags[src_mag], ext, cur_x, cur_y, cur_z)
+        path_hash[(cur_x, cur_y, cur_z)] = make_cube_full_path(dataset_base_path, exp_name,
+                isrc_mag, ext, cur_x, cur_y, cur_z)[1]
 
         if cur_x > max_x or cur_y > max_y or cur_z > max_z:
             path_hash[(cur_x, cur_y, cur_z)] = 'bogus'
@@ -1175,6 +1177,10 @@ def make_mag1_cubes_from_z_stack(config,
             # zero-fill remainder slices in last cube
             if cur_z == num_z_cubes-1 and rmd_z > 0:
                 this_layer_out_block[rmd_z:,:,:] = 0
+            # zero-fill remainder xcubes on last x pass for each layer
+            if cur_pass == num_passes_per_cube_layer-1:
+                rmd = xpass_range[1] % (num_x_cubes_per_pass * cube_edge_len)
+                if rmd > 0: this_layer_out_block[:,rmd:,:] = 0
 
 
             # write out the cubes for this z-cube layer and buffer
@@ -1322,7 +1328,7 @@ def knossos_cuber(config, log_fn):
         keep_z_until_mag = config.getint('Processing', 'keep_z_until_mag', fallback=1)
         cnt_downsamples = 0
         while curr_mag <= mags_to_gen:
-            if cnt_downsamples < dmag_rng[0] or (dmag_rng[1] > 0 and cnt_downsamples >= dmag_rng): continue
+            if cnt_downsamples < dmag_rng[0] or (dmag_rng[1] > 0 and cnt_downsamples >= dmag_rng[1]): continue
             if knossos_mag_names:
                 prev_mag = curr_mag // 2
             else:
@@ -1349,7 +1355,7 @@ def knossos_cuber(config, log_fn):
             cnt_downsamples += 1
         #while curr_mag <= mags_to_gen:
 
-        log_fn("All mags generated. Took {0:.4f} h."
+        log_fn("All specified mags generated. Took {0:.4f} h."
                .format((time.time() - total_down_ref_time)/3600))
 
     if config.getboolean('Compression', 'perform_compression'):
